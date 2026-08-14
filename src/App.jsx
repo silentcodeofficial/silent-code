@@ -101,6 +101,29 @@ function productReferenceCost(data, productId) {
   return { unitCost: est.perUnit, source: "estimate" };
 }
 
+/* ---- finished-goods stock available to sell ---- */
+
+function producedQty(data, productId) {
+  return data.batches.filter((b) => b.productId === productId).reduce((s, b) => s + (Number(b.unitsProduced) || 0), 0);
+}
+function soldQtyExcludingInvoice(data, productId, excludeInvoiceId) {
+  let qty = 0;
+  data.invoices.forEach((inv) => {
+    if (inv.id === excludeInvoiceId) return;
+    (inv.items || []).forEach((it) => { if (it.productId === productId) qty += Number(it.qty) || 0; });
+  });
+  return qty;
+}
+function sampledQty(data, productId) {
+  return data.marketing.filter((m) => m.type === "sample" && m.productId === productId).reduce((s, m) => s + (Number(m.qty) || 0), 0);
+}
+function lostQty(data, productId) {
+  return data.losses.filter((l) => l.productId === productId).reduce((s, l) => s + (Number(l.qty) || 0), 0);
+}
+function availableToSell(data, productId, excludeInvoiceId) {
+  return producedQty(data, productId) - soldQtyExcludingInvoice(data, productId, excludeInvoiceId) - sampledQty(data, productId) - lostQty(data, productId);
+}
+
 function invoiceComputed(inv) {
   const items = (inv.items || []).map((it) => {
     const qty = Number(it.qty) || 0;
@@ -124,175 +147,221 @@ function invoiceComputed(inv) {
 
 /* ---- printing: fully isolated popup window, independent of the app's own CSS/layout ---- */
 
-const PRINT_DOC_STYLES = `
+const PRINT_LABELS = {
+  ar: {
+    dir: "rtl", htmlLang: "ar", fontFamily: "'Cairo','Segoe UI',Tahoma,Arial,sans-serif",
+    docTitle: "فاتورة بيع", tagline: "صناعة وتغليف العطور",
+    customerInfo: "معلومات العميل", delivery: "التسليم", pickup: "استلام من المصنع", deliveryType: "توصيل",
+    item: "الصنف", qty: "الكمية", unitPrice: "سعر الوحدة", discount: "خصم", total: "الإجمالي",
+    subtotal: "المجموع", invoiceDiscount: "خصم الفاتورة", grandTotal: "الإجمالي الكلي",
+    notes: "ملاحظات", thanks: "شكرًا لثقتكم بنا 🤍", gift: "🎁 هدية", currency: "ر.ع",
+    periodTagline: "كشف حساب فترة (للاستخدام الداخلي)", from: "من", to: "إلى",
+    invoiceNo: "رقم الفاتورة", customer: "العميل", paymentMethod: "طريقة الدفع",
+    byMethod: "التوزيع حسب طريقة الدفع", invoiceCount: "عدد الفواتير",
+  },
+  en: {
+    dir: "ltr", htmlLang: "en", fontFamily: "'Segoe UI',Tahoma,Arial,sans-serif",
+    docTitle: "Sales Invoice", tagline: "Perfume Manufacturing & Packaging",
+    customerInfo: "Customer Info", delivery: "Delivery", pickup: "Factory Pickup", deliveryType: "Delivery",
+    item: "Item", qty: "Qty", unitPrice: "Unit Price", discount: "Discount", total: "Total",
+    subtotal: "Subtotal", invoiceDiscount: "Invoice Discount", grandTotal: "Grand Total",
+    notes: "Notes", thanks: "Thank you for your trust 🤍", gift: "🎁 Gift", currency: "OMR",
+    periodTagline: "Period Statement (internal use)", from: "From", to: "To",
+    invoiceNo: "Invoice No.", customer: "Customer", paymentMethod: "Payment Method",
+    byMethod: "Breakdown by Payment Method", invoiceCount: "Invoice Count",
+  },
+};
+
+function printStyles(lang) {
+  const L = PRINT_LABELS[lang];
+  const start = lang === "ar" ? "right" : "left";
+  const end = lang === "ar" ? "left" : "right";
+  return `
   * { box-sizing: border-box; }
-  body { font-family: 'Cairo', 'Segoe UI', Tahoma, Arial, sans-serif; direction: rtl; margin: 0; color: #22302B; background: #fff; }
+  body { font-family: ${L.fontFamily}; direction: ${L.dir}; margin: 0; color: #22302B; background: #fff; }
   .sheet { max-width: 780px; margin: 0 auto; padding: 0 36px 36px; }
   .accent-bar { height: 8px; background: linear-gradient(90deg, #0E6E5B, #17a382); }
-  .print-head { display: flex; justify-content: space-between; align-items: flex-start; padding-top: 26px; padding-bottom: 18px; border-bottom: 1px solid #E3DCCB; margin-bottom: 20px; }
+  .print-head { padding-top: 26px; padding-bottom: 18px; border-bottom: 1px solid #E3DCCB; margin-bottom: 20px; overflow: hidden; }
+  .head-col { display: inline-block; vertical-align: top; width: 48%; }
+  .head-brand { text-align: ${start}; }
+  .head-meta { text-align: ${end}; float: ${end}; }
   .print-brand { font-weight: 800; font-size: 24px; letter-spacing: 1px; color: #0E6E5B; }
   .print-tagline { font-size: 11px; color: #8A9490; margin-top: 2px; }
-  .biz-info { font-size: 11px; color: #6B7770; margin-top: 8px; line-height: 1.7; }
-  .doc-title { font-size: 13px; font-weight: 700; color: #6B7770; text-align: left; margin-bottom: 6px; letter-spacing: .5px; }
+  .biz-info { font-size: 11px; color: #6B7770; margin-top: 8px; line-height: 1.8; }
+  .biz-info div { margin-bottom: 2px; }
+  .doc-title { font-size: 13px; font-weight: 700; color: #6B7770; margin-bottom: 6px; letter-spacing: .5px; }
   .invoice-badge { display: inline-block; background: #0E6E5B; color: #fff; font-weight: 800; font-size: 15px; padding: 5px 14px; border-radius: 999px; margin-bottom: 8px; }
-  .print-meta { font-size: 12px; text-align: left; color: #444; line-height: 1.9; }
-  .info-grid { display: flex; gap: 14px; margin-bottom: 20px; }
-  .info-box { flex: 1; background: #FBF8F2; border: 1px solid #E3DCCB; border-radius: 10px; padding: 12px 14px; }
+  .print-meta-line { font-size: 12px; color: #444; line-height: 1.9; }
+  .info-grid { overflow: hidden; margin-bottom: 20px; }
+  .info-box { box-sizing: border-box; display: inline-block; vertical-align: top; width: 48%; background: #FBF8F2; border: 1px solid #E3DCCB; border-radius: 10px; padding: 12px 14px; }
+  .info-box.first { float: ${start}; }
+  .info-box.second { float: ${end}; }
   .info-box-title { font-size: 10.5px; font-weight: 700; color: #0E6E5B; margin-bottom: 6px; letter-spacing: .3px; }
-  .info-box div { font-size: 12.5px; color: #333; line-height: 1.8; }
-  table { width: 100%; border-collapse: collapse; margin-bottom: 18px; }
-  thead th { background: #0E6E5B; color: #fff; font-size: 11.5px; font-weight: 700; padding: 10px; text-align: right; }
-  thead th:first-child { border-radius: 8px 0 0 0; }
-  thead th:last-child { border-radius: 0 8px 0 0; }
-  tbody td { padding: 9px 10px; font-size: 12.5px; border-bottom: 1px solid #EFEAE0; }
-  tbody tr:nth-child(even) { background: #FBF8F2; }
-  .totals-wrap { display: flex; justify-content: flex-end; margin-bottom: 20px; }
-  .totals { min-width: 260px; font-size: 12.5px; }
-  .totals-row { display: flex; justify-content: space-between; padding: 5px 0; color: #555; }
-  .grand-total { display: flex; justify-content: space-between; background: #0E6E5B; color: #fff; padding: 10px 14px; border-radius: 9px; font-weight: 800; font-size: 15px; margin-top: 6px; }
-  .note { margin-top: 10px; font-size: 12px; color: #444; background: #FBF8F2; border-radius: 8px; padding: 10px 12px; }
-  .foot { margin-top: 34px; text-align: center; border-top: 1px solid #E3DCCB; padding-top: 16px; }
+  .info-box div.row { font-size: 12.5px; color: #333; line-height: 1.8; }
+  table.items { width: 100%; border-collapse: collapse; margin-bottom: 18px; clear: both; }
+  table.items thead th { background: #0E6E5B; color: #fff; font-size: 11.5px; font-weight: 700; padding: 10px; text-align: ${start}; }
+  table.items thead th:first-child { border-radius: ${lang === "ar" ? "8px 0 0 0" : "0 8px 0 0"}; }
+  table.items thead th:last-child { border-radius: ${lang === "ar" ? "0 8px 0 0" : "8px 0 0 0"}; }
+  table.items tbody td { padding: 9px 10px; font-size: 12.5px; border-bottom: 1px solid #EFEAE0; text-align: ${start}; }
+  table.items tbody tr:nth-child(even) { background: #FBF8F2; }
+  .totals-wrap { overflow: hidden; margin-bottom: 20px; }
+  .totals { box-sizing: border-box; display: inline-block; min-width: 260px; font-size: 12.5px; float: ${end}; }
+  .totals-row { overflow: hidden; padding: 5px 0; color: #555; }
+  .totals-row span:first-child { float: ${start}; }
+  .totals-row span:last-child { float: ${end}; }
+  .grand-total { overflow: hidden; background: #0E6E5B; color: #fff; padding: 10px 14px; border-radius: 9px; font-weight: 800; font-size: 15px; margin-top: 6px; }
+  .grand-total span:first-child { float: ${start}; }
+  .grand-total span:last-child { float: ${end}; }
+  .note { clear: both; margin-top: 10px; font-size: 12px; color: #444; background: #FBF8F2; border-radius: 8px; padding: 10px 12px; }
+  .foot { clear: both; margin-top: 34px; text-align: center; border-top: 1px solid #E3DCCB; padding-top: 16px; }
   .foot-thanks { font-size: 13.5px; font-weight: 700; color: #0E6E5B; margin-bottom: 4px; }
   .foot-note { font-size: 11px; color: #8A9490; }
+  bdi { unicode-bidi: isolate; }
 `;
+}
 
-function openPrintWindow(bodyHTML) {
+function openPrintWindow(lang, bodyHTML) {
   const win = window.open("", "_blank", "width=850,height=1000");
   if (!win) {
-    alert("المتصفح منع فتح نافذة الطباعة. فعّل النوافذ المنبثقة (Popups) لهذا الموقع وحاول مرة ثانية.");
+    alert("المتصفح منع فتح نافذة الطباعة. فعّل النوافذ المنبثقة (Popups) لهذا الموقع وحاول مرة ثانية. / Popup blocked — please allow popups for this site.");
     return;
   }
+  const L = PRINT_LABELS[lang];
   win.document.open();
-  win.document.write(`<!doctype html><html dir="rtl" lang="ar"><head><meta charset="utf-8" /><title>طباعة</title><style>${PRINT_DOC_STYLES}</style></head><body>${bodyHTML}</body></html>`);
+  win.document.write(`<!doctype html><html dir="${L.dir}" lang="${L.htmlLang}"><head><meta charset="utf-8" /><title>${L.docTitle}</title><style>${printStyles(lang)}</style></head><body>${bodyHTML}</body></html>`);
   win.document.close();
-  win.onload = () => {
-    win.focus();
-    win.print();
-  };
-  // fallback in case onload doesn't fire in some browsers
+  win.onload = () => { win.focus(); win.print(); };
   setTimeout(() => { try { win.focus(); win.print(); } catch (e) {} }, 400);
 }
 
-function printInvoiceNow(invoice, data) {
+function printInvoiceNow(invoice, data, lang = "ar") {
+  const L = PRINT_LABELS[lang];
   const computed = invoiceComputed(invoice);
   const biz = data.settings.businessInfo || {};
   const rows = computed.items
     .filter((it) => it.productId)
     .map((it) => {
       const prod = data.products.find((p) => p.id === it.productId);
+      const name = lang === "en" ? (prod?.nameEn || prod?.name || "—") : (prod?.name || "—");
       return `<tr>
-        <td>${prod?.name || "—"}${it.free ? " 🎁 هدية" : ""}</td>
-        <td>${it.qty}</td>
-        <td>${fmt(it.price)}</td>
-        <td>${it.lineDiscount ? fmt(it.lineDiscount) : "—"}</td>
-        <td>${fmt(it.afterLineDiscount)}</td>
+        <td>${name}${it.free ? ` ${L.gift}` : ""}</td>
+        <td><bdi>${it.qty}</bdi></td>
+        <td><bdi>${fmt(it.price)}</bdi></td>
+        <td><bdi>${it.lineDiscount ? fmt(it.lineDiscount) : "—"}</bdi></td>
+        <td><bdi>${fmt(it.afterLineDiscount)}</bdi></td>
       </tr>`;
     })
     .join("");
 
   const bizLines = [
-    biz.phone && `📞 ${biz.phone}`,
-    biz.address && `📍 ${biz.address}`,
-    biz.instagram && `📷 ${biz.instagram}`,
-  ].filter(Boolean).join(" &nbsp;&nbsp;·&nbsp;&nbsp; ");
+    biz.phone && `<div>${biz.phone}</div>`,
+    biz.address && `<div>${biz.address}</div>`,
+    biz.instagram && `<div>${biz.instagram}</div>`,
+  ].filter(Boolean).join("");
+
+  const deliveryLine = invoice.deliveryType === "delivery"
+    ? `${L.deliveryType}${invoice.deliveryAddress ? `<div class="row">${invoice.deliveryAddress}</div>` : ""}`
+    : L.pickup;
 
   const html = `
     <div class="accent-bar"></div>
     <div class="sheet">
       <div class="print-head">
-        <div>
+        <div class="head-col head-brand">
           <div class="print-brand">SILENT CODE</div>
-          <div class="print-tagline">صناعة وتغليف العطور</div>
+          <div class="print-tagline">${L.tagline}</div>
           ${bizLines ? `<div class="biz-info">${bizLines}</div>` : ""}
         </div>
-        <div>
-          <div class="doc-title">فاتورة بيع</div>
-          <div class="invoice-badge">#${invoice.number}</div>
-          <div class="print-meta">
-            <div>${invoice.date}</div>
+        <div class="head-col head-meta">
+          <div class="doc-title">${L.docTitle}</div>
+          <div class="invoice-badge"><bdi>#${invoice.number}</bdi></div>
+          <div class="print-meta-line">
+            <div><bdi>${invoice.date}</bdi></div>
             ${invoice.paymentMethod ? `<div>${invoice.paymentMethod}</div>` : ""}
           </div>
         </div>
       </div>
 
       <div class="info-grid">
-        <div class="info-box">
-          <div class="info-box-title">معلومات العميل</div>
-          <div>${invoice.customerName || "—"}</div>
-          ${invoice.customerPhone ? `<div>${invoice.customerPhone}</div>` : ""}
+        <div class="info-box first">
+          <div class="info-box-title">${L.customerInfo}</div>
+          <div class="row">${invoice.customerName || "—"}</div>
+          ${invoice.customerPhone ? `<div class="row"><bdi>${invoice.customerPhone}</bdi></div>` : ""}
         </div>
-        <div class="info-box">
-          <div class="info-box-title">التسليم</div>
-          <div>${invoice.deliveryType === "delivery" ? "توصيل" : "استلام من المصنع"}</div>
-          ${invoice.deliveryType === "delivery" && invoice.deliveryAddress ? `<div>${invoice.deliveryAddress}</div>` : ""}
+        <div class="info-box second">
+          <div class="info-box-title">${L.delivery}</div>
+          <div class="row">${deliveryLine}</div>
         </div>
       </div>
 
-      <table>
-        <thead><tr><th>الصنف</th><th>الكمية</th><th>سعر الوحدة</th><th>خصم</th><th>الإجمالي</th></tr></thead>
+      <table class="items">
+        <thead><tr><th>${L.item}</th><th>${L.qty}</th><th>${L.unitPrice}</th><th>${L.discount}</th><th>${L.total}</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
 
       <div class="totals-wrap">
         <div class="totals">
-          <div class="totals-row"><span>المجموع</span><span>${fmt(computed.subtotal)} ر.ع</span></div>
-          ${computed.invoiceDiscountAmount > 0 ? `<div class="totals-row"><span>خصم الفاتورة</span><span>-${fmt(computed.invoiceDiscountAmount)} ر.ع</span></div>` : ""}
-          <div class="grand-total"><span>الإجمالي الكلي</span><span>${fmt(computed.grandTotal)} ر.ع</span></div>
+          <div class="totals-row"><span>${L.subtotal}</span><span><bdi>${fmt(computed.subtotal)} ${L.currency}</bdi></span></div>
+          ${computed.invoiceDiscountAmount > 0 ? `<div class="totals-row"><span>${L.invoiceDiscount}</span><span><bdi>-${fmt(computed.invoiceDiscountAmount)} ${L.currency}</bdi></span></div>` : ""}
+          <div class="grand-total"><span>${L.grandTotal}</span><span><bdi>${fmt(computed.grandTotal)} ${L.currency}</bdi></span></div>
         </div>
       </div>
 
-      ${invoice.note ? `<div class="note">ملاحظات: ${invoice.note}</div>` : ""}
+      ${invoice.note ? `<div class="note">${L.notes}: ${invoice.note}</div>` : ""}
 
       <div class="foot">
-        <div class="foot-thanks">شكرًا لثقتكم بنا 🤍</div>
+        <div class="foot-thanks">${L.thanks}</div>
         <div class="foot-note">${biz.note || "SILENT CODE"}</div>
       </div>
     </div>
   `;
-  openPrintWindow(html);
+  openPrintWindow(lang, html);
 }
 
-function printPeriodNow(period, data) {
+function printPeriodNow(period, data, lang = "ar") {
+  const L = PRINT_LABELS[lang];
   const { dateFrom, dateTo, invoices, total, byMethod } = period;
   const rows = [...invoices]
     .sort((a, b) => (a.date < b.date ? -1 : 1))
     .map((inv) => `<tr>
-      <td>#${inv.number}</td>
-      <td>${inv.date}</td>
+      <td><bdi>#${inv.number}</bdi></td>
+      <td><bdi>${inv.date}</bdi></td>
       <td>${inv.customerName || "—"}</td>
       <td>${inv.paymentMethod || "—"}</td>
-      <td>${fmt(invoiceComputed(inv).grandTotal)}</td>
+      <td><bdi>${fmt(invoiceComputed(inv).grandTotal)}</bdi></td>
     </tr>`)
     .join("");
-  const methodRows = Object.entries(byMethod).map(([method, amt]) => `<div class="totals-row"><span>${method}</span><span>${fmt(amt)} ر.ع</span></div>`).join("");
+  const methodRows = Object.entries(byMethod).map(([method, amt]) => `<div class="totals-row"><span>${method}</span><span><bdi>${fmt(amt)} ${L.currency}</bdi></span></div>`).join("");
   const html = `
     <div class="accent-bar"></div>
     <div class="sheet">
       <div class="print-head">
-        <div>
+        <div class="head-col head-brand">
           <div class="print-brand">SILENT CODE</div>
-          <div class="print-tagline">كشف حساب فترة (للاستخدام الداخلي)</div>
+          <div class="print-tagline">${L.periodTagline}</div>
         </div>
-        <div class="print-meta">
-          <div>من: ${dateFrom || "البداية"}</div>
-          <div>إلى: ${dateTo || "الآن"}</div>
+        <div class="head-col head-meta">
+          <div class="print-meta-line">
+            <div>${L.from}: <bdi>${dateFrom || "—"}</bdi></div>
+            <div>${L.to}: <bdi>${dateTo || "—"}</bdi></div>
+          </div>
         </div>
       </div>
-      <table>
-        <thead><tr><th>رقم الفاتورة</th><th>التاريخ</th><th>العميل</th><th>طريقة الدفع</th><th>الإجمالي</th></tr></thead>
+      <table class="items">
+        <thead><tr><th>${L.invoiceNo}</th><th>${lang === "ar" ? "التاريخ" : "Date"}</th><th>${L.customer}</th><th>${L.paymentMethod}</th><th>${L.total}</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
       <div class="totals-wrap">
         <div class="totals">
-          <div class="info-box-title" style="margin-bottom:8px;">التوزيع حسب طريقة الدفع</div>
+          <div class="info-box-title" style="margin-bottom:8px;">${L.byMethod}</div>
           ${methodRows}
-          <div class="grand-total"><span>الإجمالي الكلي</span><span>${fmt(total)} ر.ع</span></div>
+          <div class="grand-total"><span>${L.grandTotal}</span><span><bdi>${fmt(total)} ${L.currency}</bdi></span></div>
         </div>
       </div>
-      <div class="foot"><div class="foot-note">عدد الفواتير: ${invoices.length}</div></div>
+      <div class="foot"><div class="foot-note">${L.invoiceCount}: ${invoices.length}</div></div>
     </div>
   `;
-  openPrintWindow(html);
+  openPrintWindow(lang, html);
 }
 
 function productRevenueQty(data, productId) {
@@ -1013,7 +1082,7 @@ function PurchaseEditor({ purchase, materials, onSave, onClose }) {
 
 function emptyProduct() {
   return {
-    id: uid("prod"), code: "", name: "", category: "", type: "manufactured",
+    id: uid("prod"), code: "", name: "", nameEn: "", category: "", type: "manufactured",
     sellingPrice: "", batchYield: 1,
     recipe: [{ id: uid("rl"), materialId: "", qty: "" }],
   };
@@ -1171,6 +1240,9 @@ function ProductEditor({ product, materials, onSave, onClose }) {
           <div className="form-row" style={{ marginTop: 14 }}>
             <Field label="كود المنتج"><input value={p.code} onChange={(e) => set("code", e.target.value)} placeholder="مثال: P-001" /></Field>
             <Field label="اسم المنتج"><input value={p.name} onChange={(e) => set("name", e.target.value)} placeholder="مثال: عطر ورد عماني 50مل" /></Field>
+            <Field label="الاسم بالإنجليزي (اختياري)" hint="يظهر بالفاتورة الإنجليزية للعملاء الأجانب">
+              <input value={p.nameEn} onChange={(e) => set("nameEn", e.target.value)} placeholder="e.g. Omani Rose Perfume 50ml" />
+            </Field>
             <Field label="التصنيف (اختياري)"><input value={p.category} onChange={(e) => set("category", e.target.value)} /></Field>
           </div>
 
@@ -1503,7 +1575,8 @@ function InvoicesTab({ data, persist, currentUser }) {
               <div className="ticket-side">
                 <div className="ticket-total">{fmt(invoiceTotal(inv))} ر.ع</div>
                 <div className="ticket-actions">
-                  <button className="icon-btn" onClick={() => printInvoiceNow(inv, data)}><Printer size={15} /></button>
+                  <button className="icon-btn" onClick={() => printInvoiceNow(inv, data, "ar")} title="طباعة عربي"><Printer size={15} /> AR</button>
+                  <button className="icon-btn" onClick={() => printInvoiceNow(inv, data, "en")} title="Print English"><Printer size={15} /> EN</button>
                   <button className="icon-btn" onClick={() => setEditing(inv)}>تعديل</button>
                   <button className="icon-btn danger" onClick={() => remove(inv.id)}><Trash2 size={15} /></button>
                 </div>
@@ -1556,7 +1629,22 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
   function removeItem(id) { setInv({ ...inv, items: inv.items.filter((it) => it.id !== id) }); }
 
   const computed = useMemo(() => invoiceComputed(inv), [inv]);
-  const canSave = inv.items.some((it) => it.productId);
+
+  const stockIssues = useMemo(() => {
+    const requestedByProduct = {};
+    inv.items.forEach((it) => {
+      if (!it.productId) return;
+      requestedByProduct[it.productId] = (requestedByProduct[it.productId] || 0) + (Number(it.qty) || 0);
+    });
+    const issues = {};
+    Object.entries(requestedByProduct).forEach(([pid, qty]) => {
+      const avail = availableToSell(data, pid, inv.id);
+      if (qty > avail) issues[pid] = { requested: qty, available: avail };
+    });
+    return issues;
+  }, [inv.items, data, inv.id]);
+  const hasStockIssue = Object.keys(stockIssues).length > 0;
+  const canSave = inv.items.some((it) => it.productId) && !hasStockIssue;
 
   const customers = useMemo(() => customerStats(allInvoices.filter((i) => i.id !== inv.id)), [allInvoices, inv.id]);
   const matched = customers.find((c) => c.name.toLowerCase() === (inv.customerName || "").trim().toLowerCase());
@@ -1603,10 +1691,12 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
           )}
 
           <div className="sub-head">أصناف الفاتورة</div>
-          <p className="field-hint" style={{ marginBottom: 8 }}>لو الصنف هدية مجانية اضغط 🎁، ولو تبيع بسعر التكلفة اضغط "بالتكلفة". الخصم هنا يطبق على هالصنف بس.</p>
+          <p className="field-hint" style={{ marginBottom: 8 }}>لو الصنف هدية مجانية اضغط 🎁، ولو تبيع بسعر التكلفة اضغط "بالتكلفة". الخصم هنا يطبق على هالصنف بس. الكمية محدودة بالمتوفر فعليًا من دفعات الإنتاج المسجلة.</p>
           <div className="materials-list">
             {inv.items.map((it) => {
               const lineC = computed.items.find((x) => x.id === it.id) || {};
+              const avail = it.productId ? availableToSell(data, it.productId, inv.id) : null;
+              const issue = it.productId ? stockIssues[it.productId] : null;
               return (
                 <div className="invoice-item-block" key={it.id}>
                   <div className="invoice-item-row">
@@ -1619,6 +1709,13 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
                     <span className="num line-total">{fmt(lineC.afterLineDiscount)}</span>
                     <button className="icon-btn danger" onClick={() => removeItem(it.id)}><Trash2 size={14} /></button>
                   </div>
+                  {it.productId && (
+                    <p className={`field-hint ${issue ? "stock-warning" : ""}`} style={{ margin: "4px 0 0" }}>
+                      {issue
+                        ? `⚠️ المطلوب (${issue.requested}) أكبر من المتوفر للبيع (${issue.available}) — سجّل دفعة إنتاج أو قلّل الكمية`
+                        : `المتوفر للبيع: ${avail}`}
+                    </p>
+                  )}
                   <div className="invoice-item-extra">
                     <input
                       type="number" placeholder="خصم على هذا الصنف (ر.ع)" value={it.discount} disabled={it.free}
@@ -2222,6 +2319,7 @@ function Style() {
       .num{ font-family:'JetBrains Mono',monospace; }
       .pos{ color:var(--success); } .neg{ color:var(--danger); }
       .stock-low{ color:var(--danger); font-weight:700; }
+      .stock-warning{ color:var(--danger); font-weight:600; }
 
       .empty-state{ display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; padding:50px 20px; color:var(--ink-soft); background:var(--surface-2); border:1px dashed var(--border); border-radius:14px; text-align:center; }
       .empty-title{ font-weight:700; color:var(--ink); margin:2px 0 0; }
