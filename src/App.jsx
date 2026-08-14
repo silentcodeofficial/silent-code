@@ -328,10 +328,15 @@ export default function CostingApp() {
 
   useEffect(() => {
     if (printInvoice || printPeriod) {
-      const t = setTimeout(() => window.print(), 80);
+      let raf1, raf2;
+      const t = setTimeout(() => {
+        raf1 = requestAnimationFrame(() => {
+          raf2 = requestAnimationFrame(() => window.print());
+        });
+      }, 150);
       const after = () => { setPrintInvoice(null); setPrintPeriod(null); };
       window.addEventListener("afterprint", after, { once: true });
-      return () => clearTimeout(t);
+      return () => { clearTimeout(t); if (raf1) cancelAnimationFrame(raf1); if (raf2) cancelAnimationFrame(raf2); };
     }
   }, [printInvoice, printPeriod]);
 
@@ -2225,8 +2230,12 @@ function Style() {
         .print-sub{ font-size:12px; color:#555; }
         .print-meta{ font-size:12px; text-align:left; }
         .print-customer{ margin-bottom:14px; font-size:13px; }
-        .print-table{ width:100%; border-collapse:collapse; margin-bottom:16px; }
-        .print-table th, .print-table td{ border:1px solid #999; padding:8px 10px; font-size:12.5px; text-align:right; }
+        .print-table{ display:table; width:100%; border-collapse:collapse; margin-bottom:16px; }
+        .print-table thead{ display:table-header-group; }
+        .print-table tbody{ display:table-row-group; }
+        .print-table tr{ display:table-row; }
+        .print-table th, .print-table td{ display:table-cell; border:1px solid #999; padding:8px 10px; font-size:12.5px; text-align:right; }
+        .print-totals{ text-align:left; font-size:12.5px; margin-bottom:10px; display:flex; flex-direction:column; gap:3px; }
         .print-total{ font-weight:800; font-size:15px; text-align:left; }
         .print-note{ margin-top:10px; font-size:12px; color:#444; }
         .print-foot{ margin-top:30px; text-align:center; font-size:11px; color:#777; }
