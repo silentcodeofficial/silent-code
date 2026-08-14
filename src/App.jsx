@@ -121,6 +121,119 @@ function invoiceComputed(inv) {
   return { items: itemsWithNet, subtotal, invoiceDiscountAmount, grandTotal };
 }
 
+/* ---- printing: fully isolated popup window, independent of the app's own CSS/layout ---- */
+
+const PRINT_DOC_STYLES = `
+  * { box-sizing: border-box; }
+  body { font-family: 'Cairo', 'Segoe UI', Tahoma, Arial, sans-serif; direction: rtl; padding: 30px; color: #111; margin: 0; }
+  .print-head { display: flex; justify-content: space-between; border-bottom: 2px solid #111; padding-bottom: 12px; margin-bottom: 16px; }
+  .print-brand { font-weight: 800; font-size: 20px; }
+  .print-sub { font-size: 12px; color: #555; }
+  .print-meta { font-size: 12px; text-align: left; }
+  .print-customer { margin-bottom: 14px; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
+  th, td { border: 1px solid #999; padding: 8px 10px; font-size: 12.5px; text-align: right; }
+  .totals { text-align: left; font-size: 12.5px; margin-bottom: 10px; }
+  .total-line { font-weight: 800; font-size: 15px; text-align: left; margin-top: 6px; }
+  .note { margin-top: 10px; font-size: 12px; color: #444; }
+  .foot { margin-top: 30px; text-align: center; font-size: 11px; color: #777; }
+`;
+
+function openPrintWindow(bodyHTML) {
+  const win = window.open("", "_blank", "width=850,height=1000");
+  if (!win) {
+    alert("المتصفح منع فتح نافذة الطباعة. فعّل النوافذ المنبثقة (Popups) لهذا الموقع وحاول مرة ثانية.");
+    return;
+  }
+  win.document.open();
+  win.document.write(`<!doctype html><html dir="rtl" lang="ar"><head><meta charset="utf-8" /><title>طباعة</title><style>${PRINT_DOC_STYLES}</style></head><body>${bodyHTML}</body></html>`);
+  win.document.close();
+  win.onload = () => {
+    win.focus();
+    win.print();
+  };
+  // fallback in case onload doesn't fire in some browsers
+  setTimeout(() => { try { win.focus(); win.print(); } catch (e) {} }, 400);
+}
+
+function printInvoiceNow(invoice, data) {
+  const computed = invoiceComputed(invoice);
+  const rows = computed.items
+    .filter((it) => it.productId)
+    .map((it) => {
+      const prod = data.products.find((p) => p.id === it.productId);
+      return `<tr>
+        <td>${prod?.name || "—"}${it.free ? " (هدية)" : ""}</td>
+        <td>${it.qty}</td>
+        <td>${fmt(it.price)}</td>
+        <td>${it.lineDiscount ? fmt(it.lineDiscount) : "—"}</td>
+        <td>${fmt(it.afterLineDiscount)}</td>
+      </tr>`;
+    })
+    .join("");
+  const html = `
+    <div class="print-head">
+      <div><div class="print-brand">SILENT CODE</div><div class="print-sub">فاتورة بيع</div></div>
+      <div class="print-meta">
+        <div>رقم الفاتورة: ${invoice.number}</div>
+        <div>التاريخ: ${invoice.date}</div>
+        ${invoice.paymentMethod ? `<div>طريقة الدفع: ${invoice.paymentMethod}</div>` : ""}
+      </div>
+    </div>
+    <div class="print-customer">
+      <div>العميل: ${invoice.customerName || "—"}</div>
+      ${invoice.customerPhone ? `<div>الهاتف: ${invoice.customerPhone}</div>` : ""}
+    </div>
+    <table>
+      <thead><tr><th>الصنف</th><th>الكمية</th><th>سعر الوحدة</th><th>خصم</th><th>الإجمالي</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="totals">
+      <div>المجموع: ${fmt(computed.subtotal)} ر.ع</div>
+      ${computed.invoiceDiscountAmount > 0 ? `<div>خصم الفاتورة: ${fmt(computed.invoiceDiscountAmount)} ر.ع</div>` : ""}
+      <div class="total-line">الإجمالي الكلي: ${fmt(computed.grandTotal)} ر.ع</div>
+    </div>
+    ${invoice.note ? `<div class="note">ملاحظات: ${invoice.note}</div>` : ""}
+    <div class="foot">شكرًا لتعاملكم معنا</div>
+  `;
+  openPrintWindow(html);
+}
+
+function printPeriodNow(period, data) {
+  const { dateFrom, dateTo, invoices, total, byMethod } = period;
+  const rows = [...invoices]
+    .sort((a, b) => (a.date < b.date ? -1 : 1))
+    .map((inv) => `<tr>
+      <td>#${inv.number}</td>
+      <td>${inv.date}</td>
+      <td>${inv.customerName || "—"}</td>
+      <td>${inv.paymentMethod || "—"}</td>
+      <td>${fmt(invoiceComputed(inv).grandTotal)}</td>
+    </tr>`)
+    .join("");
+  const methodRows = Object.entries(byMethod).map(([method, amt]) => `<div>${method}: ${fmt(amt)} ر.ع</div>`).join("");
+  const html = `
+    <div class="print-head">
+      <div><div class="print-brand">SILENT CODE</div><div class="print-sub">كشف حساب فترة</div></div>
+      <div class="print-meta">
+        <div>من: ${dateFrom || "البداية"}</div>
+        <div>إلى: ${dateTo || "الآن"}</div>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th>رقم الفاتورة</th><th>التاريخ</th><th>العميل</th><th>طريقة الدفع</th><th>الإجمالي</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="totals">
+      <div style="font-weight:700; margin-bottom:4px;">التوزيع حسب طريقة الدفع</div>
+      ${methodRows}
+      <div class="total-line">الإجمالي الكلي: ${fmt(total)} ر.ع</div>
+    </div>
+    <div class="foot">عدد الفواتير: ${invoices.length}</div>
+  `;
+  openPrintWindow(html);
+}
+
 function productRevenueQty(data, productId) {
   let qty = 0, revenue = 0;
   data.invoices.forEach((inv) => {
@@ -299,8 +412,6 @@ export default function CostingApp() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("dashboard");
-  const [printInvoice, setPrintInvoice] = useState(null);
-  const [printPeriod, setPrintPeriod] = useState(null);
   const [currentUser, setCurrentUser] = useState(null);
 
   useEffect(() => {
@@ -325,20 +436,6 @@ export default function CostingApp() {
       console.error("save error", e);
     }
   }
-
-  useEffect(() => {
-    if (printInvoice || printPeriod) {
-      let raf1, raf2;
-      const t = setTimeout(() => {
-        raf1 = requestAnimationFrame(() => {
-          raf2 = requestAnimationFrame(() => window.print());
-        });
-      }, 150);
-      const after = () => { setPrintInvoice(null); setPrintPeriod(null); };
-      window.addEventListener("afterprint", after, { once: true });
-      return () => { clearTimeout(t); if (raf1) cancelAnimationFrame(raf1); if (raf2) cancelAnimationFrame(raf2); };
-    }
-  }, [printInvoice, printPeriod]);
 
   if (loading || !data) {
     return (
@@ -402,7 +499,7 @@ export default function CostingApp() {
         {tab === "materials" && <MaterialsTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "products" && <ProductsTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "production" && <ProductionTab data={data} persist={persist} currentUser={currentUser} />}
-        {tab === "invoices" && <InvoicesTab data={data} persist={persist} onPrint={setPrintInvoice} onPrintPeriod={setPrintPeriod} currentUser={currentUser} />}
+        {tab === "invoices" && <InvoicesTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "customers" && <CustomersTab data={data} />}
         {tab === "marketing" && <MarketingTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "losses" && <LossesTab data={data} persist={persist} currentUser={currentUser} />}
@@ -411,8 +508,7 @@ export default function CostingApp() {
         {tab === "settings" && <SettingsTab data={data} persist={persist} />}
       </main>
 
-      {printInvoice && <PrintInvoice invoice={printInvoice} data={data} />}
-      {printPeriod && <PrintPeriodSummary period={printPeriod} data={data} />}
+
     </div>
   );
 }
@@ -1239,7 +1335,7 @@ function emptyInvoice(nextNo, defaultMethod) {
   };
 }
 
-function InvoicesTab({ data, persist, onPrint, onPrintPeriod, currentUser }) {
+function InvoicesTab({ data, persist, currentUser }) {
   const [editing, setEditing] = useState(null);
   const [confirmState, setConfirmState] = useState(null);
   const [dateFrom, setDateFrom] = useState("");
@@ -1308,7 +1404,7 @@ function InvoicesTab({ data, persist, onPrint, onPrintPeriod, currentUser }) {
                   </div>
                 ))}
               </div>
-              <button className="btn-ghost" style={{ marginTop: 12 }} onClick={() => onPrintPeriod({ dateFrom, dateTo, invoices: filtered, total: periodTotal, byMethod })}>
+              <button className="btn-ghost" style={{ marginTop: 12 }} onClick={() => printPeriodNow({ dateFrom, dateTo, invoices: filtered, total: periodTotal, byMethod }, data)}>
                 <Printer size={15} /> طباعة كشف الفترة
               </button>
             </>
@@ -1344,7 +1440,7 @@ function InvoicesTab({ data, persist, onPrint, onPrintPeriod, currentUser }) {
               <div className="ticket-side">
                 <div className="ticket-total">{fmt(invoiceTotal(inv))} ر.ع</div>
                 <div className="ticket-actions">
-                  <button className="icon-btn" onClick={() => onPrint(inv)}><Printer size={15} /></button>
+                  <button className="icon-btn" onClick={() => printInvoiceNow(inv, data)}><Printer size={15} /></button>
                   <button className="icon-btn" onClick={() => setEditing(inv)}>تعديل</button>
                   <button className="icon-btn danger" onClick={() => remove(inv.id)}><Trash2 size={15} /></button>
                 </div>
@@ -1486,81 +1582,6 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
           <button className="btn-primary" disabled={!canSave} onClick={() => onSave(inv)}>حفظ الفاتورة</button>
         </div>
       </div>
-    </div>
-  );
-}
-
-function PrintInvoice({ invoice, data }) {
-  const computed = invoiceComputed(invoice);
-  return (
-    <div className="print-area" dir="rtl">
-      <div className="print-head">
-        <div><div className="print-brand">SILENT CODE</div><div className="print-sub">فاتورة بيع</div></div>
-        <div className="print-meta"><div>رقم الفاتورة: {invoice.number}</div><div>التاريخ: {invoice.date}</div>{invoice.paymentMethod && <div>طريقة الدفع: {invoice.paymentMethod}</div>}</div>
-      </div>
-      <div className="print-customer">
-        <div>العميل: {invoice.customerName || "—"}</div>
-        {invoice.customerPhone && <div>الهاتف: {invoice.customerPhone}</div>}
-      </div>
-      <table className="print-table">
-        <thead><tr><th>الصنف</th><th>الكمية</th><th>سعر الوحدة</th><th>خصم</th><th>الإجمالي</th></tr></thead>
-        <tbody>
-          {computed.items.filter((it) => it.productId).map((it) => {
-            const prod = data.products.find((p) => p.id === it.productId);
-            return (
-              <tr key={it.id}>
-                <td>{prod?.name || "—"}{it.free ? " (هدية)" : ""}</td><td>{it.qty}</td><td>{fmt(it.price)}</td>
-                <td>{it.lineDiscount ? fmt(it.lineDiscount) : "—"}</td>
-                <td>{fmt(it.afterLineDiscount)}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-      <div className="print-totals">
-        <div>المجموع: {fmt(computed.subtotal)} ر.ع</div>
-        {computed.invoiceDiscountAmount > 0 && <div>خصم الفاتورة: {fmt(computed.invoiceDiscountAmount)} ر.ع</div>}
-        <div className="print-total">الإجمالي الكلي: {fmt(computed.grandTotal)} ر.ع</div>
-      </div>
-      {invoice.note && <div className="print-note">ملاحظات: {invoice.note}</div>}
-      <div className="print-foot">شكرًا لتعاملكم معنا</div>
-    </div>
-  );
-}
-
-function PrintPeriodSummary({ period, data }) {
-  const { dateFrom, dateTo, invoices, total, byMethod } = period;
-  return (
-    <div className="print-area" dir="rtl">
-      <div className="print-head">
-        <div><div className="print-brand">SILENT CODE</div><div className="print-sub">كشف حساب فترة</div></div>
-        <div className="print-meta">
-          <div>من: {dateFrom || "البداية"}</div>
-          <div>إلى: {dateTo || "الآن"}</div>
-        </div>
-      </div>
-      <table className="print-table">
-        <thead><tr><th>رقم الفاتورة</th><th>التاريخ</th><th>العميل</th><th>طريقة الدفع</th><th>الإجمالي</th></tr></thead>
-        <tbody>
-          {[...invoices].sort((a, b) => (a.date < b.date ? -1 : 1)).map((inv) => (
-            <tr key={inv.id}>
-              <td>#{inv.number}</td>
-              <td>{inv.date}</td>
-              <td>{inv.customerName || "—"}</td>
-              <td>{inv.paymentMethod || "—"}</td>
-              <td>{fmt(invoiceComputed(inv).grandTotal)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <div className="print-totals">
-        <div className="mini-list-title" style={{ marginTop: 4 }}>التوزيع حسب طريقة الدفع</div>
-        {Object.entries(byMethod).map(([method, amt]) => (
-          <div key={method}>{method}: {fmt(amt)} ر.ع</div>
-        ))}
-        <div className="print-total">الإجمالي الكلي: {fmt(total)} ر.ع</div>
-      </div>
-      <div className="print-foot">عدد الفواتير: {invoices.length}</div>
     </div>
   );
 }
@@ -2220,26 +2241,6 @@ function Style() {
       .settings-row input{ flex:1; }
       .partner-row{ display:flex; gap:8px; align-items:center; }
       .partner-row input:first-child{ flex:1; }
-
-      .print-area{ display:none; }
-      @media print{
-        .app-shell{ display:none; }
-        .print-area{ display:block; direction:rtl; font-family:'Cairo',sans-serif; padding:30px; color:#111; }
-        .print-head{ display:flex; justify-content:space-between; border-bottom:2px solid #111; padding-bottom:12px; margin-bottom:16px; }
-        .print-brand{ font-weight:800; font-size:20px; }
-        .print-sub{ font-size:12px; color:#555; }
-        .print-meta{ font-size:12px; text-align:left; }
-        .print-customer{ margin-bottom:14px; font-size:13px; }
-        .print-table{ display:table; width:100%; border-collapse:collapse; margin-bottom:16px; }
-        .print-table thead{ display:table-header-group; }
-        .print-table tbody{ display:table-row-group; }
-        .print-table tr{ display:table-row; }
-        .print-table th, .print-table td{ display:table-cell; border:1px solid #999; padding:8px 10px; font-size:12.5px; text-align:right; }
-        .print-totals{ text-align:left; font-size:12.5px; margin-bottom:10px; display:flex; flex-direction:column; gap:3px; }
-        .print-total{ font-weight:800; font-size:15px; text-align:left; }
-        .print-note{ margin-top:10px; font-size:12px; color:#444; }
-        .print-foot{ margin-top:30px; text-align:center; font-size:11px; color:#777; }
-      }
 
       @media (max-width:820px){
         .app-shell{ flex-direction:column; }
