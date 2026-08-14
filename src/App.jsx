@@ -635,7 +635,7 @@ export default function CostingApp() {
         {tab === "losses" && <LossesTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "equipment" && <EquipmentTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "branding" && <BrandingTab data={data} persist={persist} currentUser={currentUser} />}
-        {tab === "settings" && <SettingsTab data={data} persist={persist} />}
+        {tab === "settings" && <SettingsTab data={data} persist={persist} currentUser={currentUser} />}
       </main>
 
 
@@ -2126,7 +2126,7 @@ function BrandingTab({ data, persist, currentUser }) {
 
 /* ============================== settings ============================== */
 
-function SettingsTab({ data, persist }) {
+function SettingsTab({ data, persist, currentUser }) {
   const s = data.settings;
   const fileInputRef = useRef(null);
   const [importMsg, setImportMsg] = useState("");
@@ -2138,7 +2138,11 @@ function SettingsTab({ data, persist }) {
   function removeMethod(i) { setSettings({ ...s, paymentMethods: s.paymentMethods.filter((_, idx) => idx !== i) }); }
 
   function addPartner() { setSettings({ ...s, partners: [...s.partners, { id: uid("partner"), name: "شريك جديد", percent: 0, pin: "1234" }] }); }
-  function editPartner(id, field, val) { setSettings({ ...s, partners: s.partners.map((p) => (p.id === id ? { ...p, [field]: val } : p)) }); }
+  function editPartner(id, field, val) {
+    // Privacy guard: a partner can only ever change their OWN pin, never someone else's.
+    if (field === "pin" && id !== currentUser?.id) return;
+    setSettings({ ...s, partners: s.partners.map((p) => (p.id === id ? { ...p, [field]: val } : p)) });
+  }
   function removePartner(id) { setSettings({ ...s, partners: s.partners.filter((p) => p.id !== id) }); }
 
   const partnersSum = s.partners.reduce((sum, p) => sum + (Number(p.percent) || 0), 0);
@@ -2226,17 +2230,27 @@ function SettingsTab({ data, persist }) {
       </div>
 
       <div className="panel">
-        <div className="panel-head"><h3>الشركاء وتسجيل الدخول</h3><span className="panel-sub">توزيع الباقي بعد نسبة التطوير — المجموع الحالي: {partnersSum}% — نفس الأسماء تظهر بشاشة الدخول</span></div>
+        <div className="panel-head"><h3>الشركاء وتسجيل الدخول</h3><span className="panel-sub">توزيع الباقي بعد نسبة التطوير — المجموع الحالي: {partnersSum}% — كل واحد يشوف ويغيّر رمزه هو بس</span></div>
         <div className="settings-list">
-          {s.partners.map((p) => (
-            <div className="partner-row" key={p.id}>
-              <input value={p.name} onChange={(e) => editPartner(p.id, "name", e.target.value)} placeholder="الاسم" />
-              <input type="number" style={{ maxWidth: 90 }} value={p.percent} onChange={(e) => editPartner(p.id, "percent", e.target.value)} />
-              <span className="field-hint">%</span>
-              <input value={p.pin || ""} onChange={(e) => editPartner(p.id, "pin", e.target.value)} placeholder="رمز الدخول" style={{ maxWidth: 110 }} />
-              <button className="icon-btn danger" onClick={() => removePartner(p.id)}><Trash2 size={14} /></button>
-            </div>
-          ))}
+          {s.partners.map((p) => {
+            const isMe = p.id === currentUser?.id;
+            return (
+              <div className="partner-row" key={p.id}>
+                <input value={p.name} onChange={(e) => editPartner(p.id, "name", e.target.value)} placeholder="الاسم" />
+                <input type="number" style={{ maxWidth: 90 }} value={p.percent} onChange={(e) => editPartner(p.id, "percent", e.target.value)} />
+                <span className="field-hint">%</span>
+                {isMe ? (
+                  <input
+                    type="password" value={p.pin || ""} onChange={(e) => editPartner(p.id, "pin", e.target.value)}
+                    placeholder="رمزك" style={{ maxWidth: 110 }} title="رمزك أنت فقط"
+                  />
+                ) : (
+                  <span className="pin-locked" title="ما تقدر تشوف أو تعدّل رمز شريك ثاني">🔒 مخفي</span>
+                )}
+                <button className="icon-btn danger" onClick={() => removePartner(p.id)}><Trash2 size={14} /></button>
+              </div>
+            );
+          })}
           <button className="link-btn" onClick={addPartner}><Plus size={14} /> إضافة شريك</button>
         </div>
         {partnersSum !== 100 && <p className="field-hint" style={{ color: "var(--copper)", marginTop: 6 }}>تنبيه: مجموع نسب الشركاء لازم يكون 100% عشان التوزيع يكون دقيق.</p>}
@@ -2425,6 +2439,7 @@ function Style() {
       .settings-row{ display:flex; gap:8px; align-items:center; }
       .settings-row input{ flex:1; }
       .partner-row{ display:flex; gap:8px; align-items:center; }
+      .pin-locked{ font-size:11.5px; color:var(--ink-soft); background:var(--surface-2); border:1px dashed var(--border); border-radius:7px; padding:8px 12px; min-width:80px; text-align:center; }
       .partner-row input:first-child{ flex:1; }
 
       @media (max-width:820px){
