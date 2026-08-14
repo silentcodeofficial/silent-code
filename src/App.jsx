@@ -647,7 +647,7 @@ export default function CostingApp() {
         {tab === "products" && <ProductsTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "production" && <ProductionTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "invoices" && <InvoicesTab data={data} persist={persist} currentUser={currentUser} />}
-        {tab === "customers" && <CustomersTab data={data} />}
+        {tab === "customers" && <CustomersTab data={data} persist={persist} />}
         {tab === "marketing" && <MarketingTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "losses" && <LossesTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "equipment" && <EquipmentTab data={data} persist={persist} currentUser={currentUser} />}
@@ -819,7 +819,7 @@ function emptyMaterial() {
 function emptyPurchase() {
   return {
     id: uid("pur"), date: todayStr(), note: "",
-    lines: [{ id: uid("pl"), materialId: "", qty: "", unitCost: "", currency: "OMR" }],
+    lines: [{ id: uid("pl"), materialId: "", qty: "", unitCost: "", currency: "OMR", supplierInvoiceNo: "", supplierName: "", lineNote: "" }],
     extraCosts: [],
   };
 }
@@ -938,9 +938,17 @@ function MaterialsTab({ data, persist, currentUser }) {
                       <td>
                         {pur.lines.map((l) => {
                           const mat = data.materials.find((m) => m.id === l.materialId);
+                          const supplierBits = [
+                            l.supplierName && `المورد: ${l.supplierName}`,
+                            l.supplierInvoiceNo && `فاتورة #${l.supplierInvoiceNo}`,
+                            l.lineNote,
+                          ].filter(Boolean).join(" · ");
                           return (
-                            <div key={l.id} className="num" style={{ fontSize: 11.5 }}>
-                              {mat?.name || "—"}: {l.qty} × {fmt(l.landedUnitCost)} ر.ع{l.currency === "AED" ? ` (${fmt(l.unitCostOriginal)} د.إ)` : ""}
+                            <div key={l.id} style={{ marginBottom: 4 }}>
+                              <div className="num" style={{ fontSize: 11.5 }}>
+                                {mat?.name || "—"}: {l.qty} × {fmt(l.landedUnitCost)} ر.ع{l.currency === "AED" ? ` (${fmt(l.unitCostOriginal)} د.إ)` : ""}
+                              </div>
+                              {supplierBits && <div style={{ fontSize: 10.5, color: "var(--ink-soft)" }}>{supplierBits}</div>}
                             </div>
                           );
                         })}
@@ -1008,7 +1016,7 @@ function PurchaseEditor({ purchase, materials, onSave, onClose }) {
   const [pur, setPur] = useState(purchase);
   function set(f, v) { setPur({ ...pur, [f]: v }); }
   function setLine(id, f, v) { setPur({ ...pur, lines: pur.lines.map((l) => (l.id === id ? { ...l, [f]: v } : l)) }); }
-  function addLine() { setPur({ ...pur, lines: [...pur.lines, { id: uid("pl"), materialId: "", qty: "", unitCost: "", currency: "OMR" }] }); }
+  function addLine() { setPur({ ...pur, lines: [...pur.lines, { id: uid("pl"), materialId: "", qty: "", unitCost: "", currency: "OMR", supplierInvoiceNo: "", supplierName: "", lineNote: "" }] }); }
   function removeLine(id) { setPur({ ...pur, lines: pur.lines.filter((l) => l.id !== id) }); }
   function setExtra(id, f, v) { setPur({ ...pur, extraCosts: pur.extraCosts.map((e) => (e.id === id ? { ...e, [f]: v } : e)) }); }
   function addExtra() { setPur({ ...pur, extraCosts: [...pur.extraCosts, { id: uid("ec"), label: "", amount: "", currency: "OMR" }] }); }
@@ -1030,23 +1038,30 @@ function PurchaseEditor({ purchase, materials, onSave, onClose }) {
           </div>
 
           <div className="sub-head">المواد المشتراة</div>
-          <p className="field-hint" style={{ marginBottom: 8 }}>لو اشتريت بالدرهم الإماراتي، اختر "د.إ" جنب السعر وبيتحول تلقائيًا للريال العماني (1000 د.إ = 105 ر.ع).</p>
+          <p className="field-hint" style={{ marginBottom: 8 }}>لو اشتريت بالدرهم الإماراتي، اختر "د.إ" جنب السعر وبيتحول تلقائيًا للريال العماني (1000 د.إ = 105 ر.ع). خانات الفاتورة والمورد اختيارية لكل مادة لو تحتاجها.</p>
           <div className="materials-list">
             {pur.lines.map((l) => {
               const mat = materials.find((m) => m.id === l.materialId);
               return (
-                <div className="purchase-line-row" key={l.id}>
-                  <select value={l.materialId} onChange={(e) => setLine(l.id, "materialId", e.target.value)}>
-                    <option value="">اختر مادة</option>
-                    {materials.map((m) => <option key={m.id} value={m.id}>{materialLabel(m)}</option>)}
-                  </select>
-                  <input type="number" placeholder={`الكمية${mat ? " (" + mat.unit + ")" : ""}`} value={l.qty} onChange={(e) => setLine(l.id, "qty", e.target.value)} />
-                  <input type="number" placeholder="سعر الوحدة" value={l.unitCost} onChange={(e) => setLine(l.id, "unitCost", e.target.value)} />
-                  <select value={l.currency || "OMR"} onChange={(e) => setLine(l.id, "currency", e.target.value)}>
-                    <option value="OMR">ر.ع</option>
-                    <option value="AED">د.إ</option>
-                  </select>
-                  <button className="icon-btn danger" onClick={() => removeLine(l.id)}><Trash2 size={14} /></button>
+                <div className="purchase-line-block" key={l.id}>
+                  <div className="purchase-line-row">
+                    <select value={l.materialId} onChange={(e) => setLine(l.id, "materialId", e.target.value)}>
+                      <option value="">اختر مادة</option>
+                      {materials.map((m) => <option key={m.id} value={m.id}>{materialLabel(m)}</option>)}
+                    </select>
+                    <input type="number" placeholder={`الكمية${mat ? " (" + mat.unit + ")" : ""}`} value={l.qty} onChange={(e) => setLine(l.id, "qty", e.target.value)} />
+                    <input type="number" placeholder="سعر الوحدة" value={l.unitCost} onChange={(e) => setLine(l.id, "unitCost", e.target.value)} />
+                    <select value={l.currency || "OMR"} onChange={(e) => setLine(l.id, "currency", e.target.value)}>
+                      <option value="OMR">ر.ع</option>
+                      <option value="AED">د.إ</option>
+                    </select>
+                    <button className="icon-btn danger" onClick={() => removeLine(l.id)}><Trash2 size={14} /></button>
+                  </div>
+                  <div className="purchase-line-extra">
+                    <input placeholder="رقم فاتورة المورد (اختياري)" value={l.supplierInvoiceNo} onChange={(e) => setLine(l.id, "supplierInvoiceNo", e.target.value)} />
+                    <input placeholder="اسم المورد (اختياري)" value={l.supplierName} onChange={(e) => setLine(l.id, "supplierName", e.target.value)} />
+                    <input placeholder="ملاحظات (اختياري)" value={l.lineNote} onChange={(e) => setLine(l.id, "lineNote", e.target.value)} />
+                  </div>
                 </div>
               );
             })}
@@ -1777,9 +1792,35 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
 
 /* ============================== customers ============================== */
 
-function CustomersTab({ data }) {
+function CustomersTab({ data, persist }) {
   const [openKey, setOpenKey] = useState(null);
+  const [confirmState, setConfirmState] = useState(null);
+  const [renaming, setRenaming] = useState(null); // { oldName, newName }
   const customers = useMemo(() => customerStats(data.invoices), [data.invoices]);
+
+  function removeCustomer(c) {
+    setConfirmState({
+      message: `تأكيد حذف العميل "${c.name}"؟ هذا راح يحذف كل فواتيره (${c.count} فاتورة بإجمالي ${fmt(c.total)} ر.ع) نهائيًا ولا يرجع.`,
+      onConfirm: () => {
+        const ids = new Set(c.invoices.map((inv) => inv.id));
+        persist({ ...data, invoices: data.invoices.filter((inv) => !ids.has(inv.id)) });
+      },
+    });
+  }
+
+  function saveRename() {
+    if (!renaming || !renaming.newName.trim()) return;
+    const newName = renaming.newName.trim();
+    persist({
+      ...data,
+      invoices: data.invoices.map((inv) =>
+        inv.customerName && inv.customerName.trim().toLowerCase() === renaming.oldName.toLowerCase()
+          ? { ...inv, customerName: newName }
+          : inv
+      ),
+    });
+    setRenaming(null);
+  }
 
   return (
     <div className="page">
@@ -1804,9 +1845,13 @@ function CustomersTab({ data }) {
                       <td className="num">{fmt(c.total)} ر.ع</td>
                       <td>{c.lastDate}</td>
                       <td>
-                        <button className="link-btn" onClick={() => setOpenKey(open ? null : key)}>
-                          <ChevronLeft size={13} className={`chev ${open ? "open" : ""}`} /> {open ? "إخفاء" : "السجل"}
-                        </button>
+                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                          <button className="link-btn" onClick={() => setOpenKey(open ? null : key)}>
+                            <ChevronLeft size={13} className={`chev ${open ? "open" : ""}`} /> {open ? "إخفاء" : "السجل"}
+                          </button>
+                          <button className="icon-btn" onClick={() => setRenaming({ oldName: c.name, newName: c.name })}><Pencil size={13} /></button>
+                          <button className="icon-btn danger" onClick={() => removeCustomer(c)}><Trash2 size={13} /></button>
+                        </div>
                       </td>
                     </tr>
                     {open && (
@@ -1834,6 +1879,24 @@ function CustomersTab({ data }) {
           </table>
         </div>
       )}
+
+      {renaming && (
+        <div className="modal-overlay" onClick={() => setRenaming(null)}>
+          <div className="modal" style={{ maxWidth: 380 }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head"><h3>تعديل اسم العميل</h3><button className="icon-btn" onClick={() => setRenaming(null)}><X size={18} /></button></div>
+            <div className="modal-body">
+              <Field label="الاسم الجديد" hint="يتحدث بكل الفواتير القديمة لهذا العميل تلقائيًا">
+                <input value={renaming.newName} onChange={(e) => setRenaming({ ...renaming, newName: e.target.value })} autoFocus />
+              </Field>
+            </div>
+            <div className="modal-foot">
+              <button className="btn-ghost" onClick={() => setRenaming(null)}>إلغاء</button>
+              <button className="btn-primary" disabled={!renaming.newName.trim()} onClick={saveRename}>حفظ</button>
+            </div>
+          </div>
+        </div>
+      )}
+      <ConfirmModal state={confirmState} onCancel={() => setConfirmState(null)} />
     </div>
   );
 }
@@ -2431,7 +2494,9 @@ function Style() {
 
       .materials-list{ display:flex; flex-direction:column; gap:8px; margin-bottom:6px; }
       .material-row{ display:grid; grid-template-columns:1fr 140px 34px; gap:8px; align-items:center; }
+      .purchase-line-block{ border:1px solid var(--border); border-radius:10px; padding:8px; margin-bottom:6px; }
       .purchase-line-row{ display:grid; grid-template-columns:1fr 110px 110px 80px 34px; gap:8px; align-items:center; }
+      .purchase-line-extra{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-top:8px; }
       .purchase-extra-row{ display:grid; grid-template-columns:1fr 110px 80px 34px; gap:8px; align-items:center; margin-bottom:6px; }
       .invoice-item-block{ border:1px solid var(--border); border-radius:10px; padding:8px; margin-bottom:4px; }
       .invoice-item-row{ display:grid; grid-template-columns:1.6fr .7fr .9fr .9fr 34px; gap:8px; align-items:center; }
@@ -2499,7 +2564,7 @@ function Style() {
         .sidebar-foot{ display:none; }
         .content{ padding:18px; }
         .material-row{ grid-template-columns:1fr 100px 30px; }
-        .purchase-line-row, .purchase-extra-row{ grid-template-columns:1fr; }
+        .purchase-line-row, .purchase-extra-row, .purchase-line-extra{ grid-template-columns:1fr; }
         .invoice-item-row{ grid-template-columns:1fr; }
       }
     `}</style>
