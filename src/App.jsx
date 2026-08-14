@@ -300,6 +300,7 @@ export default function CostingApp() {
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("dashboard");
   const [printInvoice, setPrintInvoice] = useState(null);
+  const [printPeriod, setPrintPeriod] = useState(null);
   const [currentUser, setCurrentUser] = useState(null);
 
   useEffect(() => {
@@ -326,13 +327,13 @@ export default function CostingApp() {
   }
 
   useEffect(() => {
-    if (printInvoice) {
+    if (printInvoice || printPeriod) {
       const t = setTimeout(() => window.print(), 80);
-      const after = () => setPrintInvoice(null);
+      const after = () => { setPrintInvoice(null); setPrintPeriod(null); };
       window.addEventListener("afterprint", after, { once: true });
       return () => clearTimeout(t);
     }
-  }, [printInvoice]);
+  }, [printInvoice, printPeriod]);
 
   if (loading || !data) {
     return (
@@ -396,7 +397,7 @@ export default function CostingApp() {
         {tab === "materials" && <MaterialsTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "products" && <ProductsTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "production" && <ProductionTab data={data} persist={persist} currentUser={currentUser} />}
-        {tab === "invoices" && <InvoicesTab data={data} persist={persist} onPrint={setPrintInvoice} currentUser={currentUser} />}
+        {tab === "invoices" && <InvoicesTab data={data} persist={persist} onPrint={setPrintInvoice} onPrintPeriod={setPrintPeriod} currentUser={currentUser} />}
         {tab === "customers" && <CustomersTab data={data} />}
         {tab === "marketing" && <MarketingTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "losses" && <LossesTab data={data} persist={persist} currentUser={currentUser} />}
@@ -406,6 +407,7 @@ export default function CostingApp() {
       </main>
 
       {printInvoice && <PrintInvoice invoice={printInvoice} data={data} />}
+      {printPeriod && <PrintPeriodSummary period={printPeriod} data={data} />}
     </div>
   );
 }
@@ -1232,9 +1234,11 @@ function emptyInvoice(nextNo, defaultMethod) {
   };
 }
 
-function InvoicesTab({ data, persist, onPrint, currentUser }) {
+function InvoicesTab({ data, persist, onPrint, onPrintPeriod, currentUser }) {
   const [editing, setEditing] = useState(null);
   const [confirmState, setConfirmState] = useState(null);
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   const methods = data.settings.paymentMethods || [];
 
   function startNew() { setEditing(emptyInvoice(data.nextInvoiceNo, methods[0])); }
@@ -1253,6 +1257,15 @@ function InvoicesTab({ data, persist, onPrint, currentUser }) {
   }
   function invoiceTotal(inv) { return invoiceComputed(inv).grandTotal; }
 
+  const filtered = data.invoices.filter((inv) => (!dateFrom || inv.date >= dateFrom) && (!dateTo || inv.date <= dateTo));
+  const isFiltering = dateFrom || dateTo;
+  const periodTotal = filtered.reduce((s, inv) => s + invoiceTotal(inv), 0);
+  const byMethod = {};
+  filtered.forEach((inv) => {
+    const m = inv.paymentMethod || "بدون طريقة دفع";
+    byMethod[m] = (byMethod[m] || 0) + invoiceTotal(inv);
+  });
+
   return (
     <div className="page">
       <PageHead
@@ -1262,13 +1275,51 @@ function InvoicesTab({ data, persist, onPrint, currentUser }) {
         action={data.products.length > 0 && <button className="btn-primary" onClick={startNew}><Plus size={16} /> فاتورة جديدة</button>}
       />
 
+      {data.invoices.length > 0 && (
+        <div className="panel">
+          <div className="panel-head"><h3>فلترة حسب التاريخ (للتسوية البنكية)</h3></div>
+          <div className="form-row">
+            <Field label="من تاريخ"><input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} /></Field>
+            <Field label="إلى تاريخ"><input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
+            {isFiltering && (
+              <div style={{ display: "flex", alignItems: "flex-end" }}>
+                <button className="btn-ghost" onClick={() => { setDateFrom(""); setDateTo(""); }}>مسح الفلتر</button>
+              </div>
+            )}
+          </div>
+
+          {isFiltering && (
+            <>
+              <div className="calc-summary">
+                <div><span>عدد الفواتير بالفترة</span><strong>{filtered.length}</strong></div>
+                <div><span>إجمالي الفترة</span><strong>{fmt(periodTotal)} ر.ع</strong></div>
+              </div>
+              <div className="mini-list" style={{ marginTop: 12 }}>
+                <div className="mini-list-title">توزيع حسب طريقة الدفع (لمطابقة كل حساب بنكي لحاله)</div>
+                {Object.entries(byMethod).map(([method, total]) => (
+                  <div className="mini-list-row" key={method}>
+                    <span>{method}</span>
+                    <span className="num">{fmt(total)} ر.ع</span>
+                  </div>
+                ))}
+              </div>
+              <button className="btn-ghost" style={{ marginTop: 12 }} onClick={() => onPrintPeriod({ dateFrom, dateTo, invoices: filtered, total: periodTotal, byMethod })}>
+                <Printer size={15} /> طباعة كشف الفترة
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
       {data.products.length === 0 ? (
         <Empty icon={Package} title="أضف منتج أولاً" sub="لازم منتج واحد على الأقل قبل ما تسوي فاتورة بيع." />
       ) : data.invoices.length === 0 ? (
         <Empty icon={Receipt} title="ما فيه فواتير بعد" sub="اضغط «فاتورة جديدة» عشان تسجل أول عملية بيع." />
+      ) : filtered.length === 0 ? (
+        <Empty icon={Receipt} title="ما فيه فواتير بهالفترة" sub="جرب توسّع نطاق التاريخ." />
       ) : (
         <div className="invoice-list">
-          {[...data.invoices].reverse().map((inv) => (
+          {[...filtered].reverse().map((inv) => (
             <div className="ticket" key={inv.id}>
               <div className="ticket-main">
                 <div className="ticket-top">
@@ -1468,6 +1519,43 @@ function PrintInvoice({ invoice, data }) {
       </div>
       {invoice.note && <div className="print-note">ملاحظات: {invoice.note}</div>}
       <div className="print-foot">شكرًا لتعاملكم معنا</div>
+    </div>
+  );
+}
+
+function PrintPeriodSummary({ period, data }) {
+  const { dateFrom, dateTo, invoices, total, byMethod } = period;
+  return (
+    <div className="print-area" dir="rtl">
+      <div className="print-head">
+        <div><div className="print-brand">SILENT CODE</div><div className="print-sub">كشف حساب فترة</div></div>
+        <div className="print-meta">
+          <div>من: {dateFrom || "البداية"}</div>
+          <div>إلى: {dateTo || "الآن"}</div>
+        </div>
+      </div>
+      <table className="print-table">
+        <thead><tr><th>رقم الفاتورة</th><th>التاريخ</th><th>العميل</th><th>طريقة الدفع</th><th>الإجمالي</th></tr></thead>
+        <tbody>
+          {[...invoices].sort((a, b) => (a.date < b.date ? -1 : 1)).map((inv) => (
+            <tr key={inv.id}>
+              <td>#{inv.number}</td>
+              <td>{inv.date}</td>
+              <td>{inv.customerName || "—"}</td>
+              <td>{inv.paymentMethod || "—"}</td>
+              <td>{fmt(invoiceComputed(inv).grandTotal)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="print-totals">
+        <div className="mini-list-title" style={{ marginTop: 4 }}>التوزيع حسب طريقة الدفع</div>
+        {Object.entries(byMethod).map(([method, amt]) => (
+          <div key={method}>{method}: {fmt(amt)} ر.ع</div>
+        ))}
+        <div className="print-total">الإجمالي الكلي: {fmt(total)} ر.ع</div>
+      </div>
+      <div className="print-foot">عدد الفواتير: {invoices.length}</div>
     </div>
   );
 }
