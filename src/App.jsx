@@ -9,7 +9,7 @@ import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   PieChart, Pie, Cell, Legend
 } from "recharts";
-import { loadAppData, saveAppData } from "./firebase";
+import { loadAppData, saveAppData, defaultAppData, watchAuth, signIn, signOutUser, resetPassword } from "./firebase";
 
 /* ============================== helpers ============================== */
 
@@ -25,36 +25,6 @@ const todayStr = () => new Date().toISOString().slice(0, 10);
 const UNITS = ["مل", "جرام", "قطعة"];
 const AED_RATE = 0.105; // 1000 AED = 105 OMR
 const toOMR = (amount, currency) => (currency === "AED" ? (Number(amount) || 0) * AED_RATE : Number(amount) || 0);
-
-function defaultData() {
-  return {
-    materials: [],
-    purchases: [],
-    products: [],
-    batches: [],
-    invoices: [],
-    marketing: [],
-    losses: [],
-    branding: [],
-    equipment: [],
-    settings: {
-      paymentMethods: [
-        "نقدًا (كاش)",
-        "تحويل - حساب الشركة",
-        "تحويل - حسابي (سعيد)",
-        "تحويل - حساب عبدالله",
-        "بوابة دفع إلكتروني",
-      ],
-      partners: [
-        { id: uid("partner"), name: "سعيد", percent: 50, pin: "1234" },
-        { id: uid("partner"), name: "عبدالله", percent: 50, pin: "1234" },
-      ],
-      devPercent: 50,
-      businessInfo: { phone: "", address: "", instagram: "", note: "" },
-    },
-    nextInvoiceNo: 1001,
-  };
-}
 
 /* ---- cost engine ---- */
 
@@ -479,19 +449,41 @@ function PageHead({ eyebrow, title, desc, action }) {
   );
 }
 
-function LoginScreen({ partners, onLogin }) {
-  const [selected, setSelected] = useState(null);
-  const [pin, setPin] = useState("");
+function LoginScreen({ onSignedIn }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [resetMsg, setResetMsg] = useState("");
 
-  function submit() {
-    if (!selected) return;
-    if (String(pin) === String(selected.pin || "")) {
-      onLogin({ id: selected.id, name: selected.name });
-    } else {
-      setError("الرمز غلط، حاول مرة ثانية");
-      setPin("");
+  async function submit() {
+    if (!email || !password) return;
+    setBusy(true);
+    setError("");
+    setResetMsg("");
+    try {
+      const user = await signIn(email, password);
+      onSignedIn(user);
+    } catch (e) {
+      setError("الإيميل أو كلمة المرور غلط. تأكد منهم وحاول مرة ثانية.");
     }
+    setBusy(false);
+  }
+
+  async function forgotPassword() {
+    if (!email) {
+      setError("اكتب إيميلك فوق أولاً، وبعدها اضغط نسيت كلمة المرور.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await resetPassword(email);
+      setResetMsg("أرسلنا رابط تعيين كلمة مرور جديدة لإيميلك، تأكد من صندوق الوارد.");
+    } catch (e) {
+      setError("ما قدرنا نرسل رابط الاستعادة. تأكد إن الإيميل صحيح.");
+    }
+    setBusy(false);
   }
 
   return (
@@ -501,36 +493,30 @@ function LoginScreen({ partners, onLogin }) {
         <div className="brand-mark" style={{ margin: "0 auto 14px" }}>م</div>
         <h2>SILENT CODE</h2>
         <p className="login-brand-sub">نظام محاسبة التصنيع والتغليف</p>
-        <p className="login-sub">اختر اسمك وأدخل الرمز عشان تدخل</p>
+        <p className="login-sub">سجّل دخولك بإيميلك وكلمة المرور</p>
 
-        <div className="login-users">
-          {partners.map((p) => (
-            <button
-              key={p.id}
-              className={`login-user-btn ${selected?.id === p.id ? "active" : ""}`}
-              onClick={() => { setSelected(p); setError(""); setPin(""); }}
-            >
-              {p.name}
-            </button>
-          ))}
+        <div className="login-form">
+          <input
+            type="email" placeholder="الإيميل" value={email}
+            onChange={(e) => { setEmail(e.target.value); setError(""); setResetMsg(""); }}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+            autoFocus
+          />
+          <input
+            type="password" placeholder="كلمة المرور" value={password}
+            onChange={(e) => { setPassword(e.target.value); setError(""); setResetMsg(""); }}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+          />
+          <button className="btn-primary" onClick={submit} disabled={!email || !password || busy}>
+            {busy ? "..." : "دخول"}
+          </button>
+          <button type="button" className="link-btn" style={{ justifyContent: "center", marginTop: 4 }} onClick={forgotPassword} disabled={busy}>
+            نسيت كلمة المرور؟
+          </button>
         </div>
 
-        {selected && (
-          <div className="login-pin-row">
-            <input
-              type="password"
-              inputMode="numeric"
-              maxLength={6}
-              placeholder="الرمز"
-              value={pin}
-              onChange={(e) => { setPin(e.target.value); setError(""); }}
-              onKeyDown={(e) => e.key === "Enter" && submit()}
-              autoFocus
-            />
-            <button className="btn-primary" onClick={submit} disabled={!pin}>دخول</button>
-          </div>
-        )}
         {error && <p className="login-error">{error}</p>}
+        {resetMsg && <p className="login-reset-msg">{resetMsg}</p>}
       </div>
     </div>
   );
@@ -542,20 +528,29 @@ export default function CostingApp() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("dashboard");
-  const [currentUser, setCurrentUser] = useState(null);
+  const [authUser, setAuthUser] = useState(undefined); // undefined = not checked yet, null = signed out, object = signed in
 
   useEffect(() => {
+    const unsub = watchAuth((user) => setAuthUser(user || null));
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    if (!authUser) return;
+    let cancelled = false;
     (async () => {
+      setLoading(true);
       try {
         const loaded = await loadAppData();
-        setData(loaded);
+        if (!cancelled) setData(loaded);
       } catch (e) {
         console.error("load error", e);
-        setData(defaultData());
+        if (!cancelled) setData(defaultAppData());
       }
-      setLoading(false);
+      if (!cancelled) setLoading(false);
     })();
-  }, []);
+    return () => { cancelled = true; };
+  }, [authUser]);
 
   async function persist(next) {
     const prev = data;
@@ -565,6 +560,25 @@ export default function CostingApp() {
     } catch (e) {
       console.error("save error", e);
     }
+  }
+
+  async function handleLogout() {
+    await signOutUser();
+    setData(null);
+  }
+
+  if (authUser === undefined) {
+    return (
+      <div className="boot-screen">
+        <Style />
+        <Loader2 className="spin" size={26} />
+        <span>...</span>
+      </div>
+    );
+  }
+
+  if (!authUser) {
+    return <LoginScreen onSignedIn={() => {}} />;
   }
 
   if (loading || !data) {
@@ -577,9 +591,12 @@ export default function CostingApp() {
     );
   }
 
-  if (!currentUser) {
-    return <LoginScreen partners={data.settings.partners || []} onLogin={setCurrentUser} />;
-  }
+  const currentUser = (() => {
+    const match = (data.settings.partners || []).find(
+      (p) => (p.email || "").trim().toLowerCase() === (authUser.email || "").trim().toLowerCase()
+    );
+    return match ? { id: match.id, name: match.name } : { id: authUser.uid, name: authUser.email };
+  })();
 
   const NAV = [
     { id: "dashboard", label: "الرئيسية", icon: LayoutDashboard },
@@ -616,7 +633,7 @@ export default function CostingApp() {
         </nav>
         <div className="sidebar-user">
           <div className="sidebar-user-name">{currentUser.name}</div>
-          <button className="logout-btn" onClick={() => setCurrentUser(null)}>تسجيل خروج</button>
+          <button className="logout-btn" onClick={handleLogout}>تسجيل خروج</button>
         </div>
         <div className="sidebar-foot">
           <Users size={13} />
@@ -2137,10 +2154,8 @@ function SettingsTab({ data, persist, currentUser }) {
   function editMethod(i, val) { const arr = [...s.paymentMethods]; arr[i] = val; setSettings({ ...s, paymentMethods: arr }); }
   function removeMethod(i) { setSettings({ ...s, paymentMethods: s.paymentMethods.filter((_, idx) => idx !== i) }); }
 
-  function addPartner() { setSettings({ ...s, partners: [...s.partners, { id: uid("partner"), name: "شريك جديد", percent: 0, pin: "1234" }] }); }
+  function addPartner() { setSettings({ ...s, partners: [...s.partners, { id: uid("partner"), name: "شريك جديد", percent: 0, email: "" }] }); }
   function editPartner(id, field, val) {
-    // Privacy guard: a partner can only ever change their OWN pin, never someone else's.
-    if (field === "pin" && id !== currentUser?.id) return;
     setSettings({ ...s, partners: s.partners.map((p) => (p.id === id ? { ...p, [field]: val } : p)) });
   }
   function removePartner(id) { setSettings({ ...s, partners: s.partners.filter((p) => p.id !== id) }); }
@@ -2230,27 +2245,21 @@ function SettingsTab({ data, persist, currentUser }) {
       </div>
 
       <div className="panel">
-        <div className="panel-head"><h3>الشركاء وتسجيل الدخول</h3><span className="panel-sub">توزيع الباقي بعد نسبة التطوير — المجموع الحالي: {partnersSum}% — كل واحد يشوف ويغيّر رمزه هو بس</span></div>
+        <div className="panel-head"><h3>الشركاء وتسجيل الدخول</h3><span className="panel-sub">توزيع الباقي بعد نسبة التطوير — المجموع الحالي: {partnersSum}%</span></div>
+        <p className="field-hint" style={{ marginBottom: 10 }}>الإيميل هنا لازم يطابق بالضبط الإيميل المسجّل لهذا الشريك بحساب Firebase Authentication (يضبطه صاحب المشروع من Firebase Console). كلمات المرور نفسها ما تُخزّن ولا تظهر بهذا البرنامج إطلاقًا — تُدار بشكل آمن من Google مباشرة.</p>
         <div className="settings-list">
-          {s.partners.map((p) => {
-            const isMe = p.id === currentUser?.id;
-            return (
-              <div className="partner-row" key={p.id}>
-                <input value={p.name} onChange={(e) => editPartner(p.id, "name", e.target.value)} placeholder="الاسم" />
-                <input type="number" style={{ maxWidth: 90 }} value={p.percent} onChange={(e) => editPartner(p.id, "percent", e.target.value)} />
-                <span className="field-hint">%</span>
-                {isMe ? (
-                  <input
-                    type="password" value={p.pin || ""} onChange={(e) => editPartner(p.id, "pin", e.target.value)}
-                    placeholder="رمزك" style={{ maxWidth: 110 }} title="رمزك أنت فقط"
-                  />
-                ) : (
-                  <span className="pin-locked" title="ما تقدر تشوف أو تعدّل رمز شريك ثاني">🔒 مخفي</span>
-                )}
-                <button className="icon-btn danger" onClick={() => removePartner(p.id)}><Trash2 size={14} /></button>
-              </div>
-            );
-          })}
+          {s.partners.map((p) => (
+            <div className="partner-row" key={p.id}>
+              <input value={p.name} onChange={(e) => editPartner(p.id, "name", e.target.value)} placeholder="الاسم" />
+              <input type="number" style={{ maxWidth: 90 }} value={p.percent} onChange={(e) => editPartner(p.id, "percent", e.target.value)} />
+              <span className="field-hint">%</span>
+              <input
+                type="email" value={p.email || ""} onChange={(e) => editPartner(p.id, "email", e.target.value)}
+                placeholder="الإيميل المسجّل بـ Firebase" style={{ maxWidth: 220 }}
+              />
+              <button className="icon-btn danger" onClick={() => removePartner(p.id)}><Trash2 size={14} /></button>
+            </div>
+          ))}
           <button className="link-btn" onClick={addPartner}><Plus size={14} /> إضافة شريك</button>
         </div>
         {partnersSum !== 100 && <p className="field-hint" style={{ color: "var(--copper)", marginTop: 6 }}>تنبيه: مجموع نسب الشركاء لازم يكون 100% عشان التوزيع يكون دقيق.</p>}
@@ -2300,9 +2309,10 @@ function Style() {
       .login-users{ display:flex; flex-direction:column; gap:8px; }
       .login-user-btn{ padding:11px; border-radius:10px; border:1px solid var(--border); background:var(--surface-2); font-family:'Cairo'; font-size:14px; font-weight:600; cursor:pointer; color:var(--ink); }
       .login-user-btn.active{ background:var(--teal); color:#fff; border-color:var(--teal); }
-      .login-pin-row{ display:flex; gap:8px; margin-top:14px; }
-      .login-pin-row input{ text-align:center; letter-spacing:3px; font-size:16px; }
+      .login-form{ display:flex; flex-direction:column; gap:10px; }
+      .login-form input{ text-align:center; font-size:14px; }
       .login-error{ color:var(--danger); font-size:12px; margin:10px 0 0; }
+      .login-reset-msg{ color:var(--success); font-size:12px; margin:10px 0 0; }
 
       .content{ flex:1; min-width:0; padding:28px 32px; overflow-x:hidden; }
       .page{ max-width:1080px; margin:0 auto; display:flex; flex-direction:column; gap:20px; }
@@ -2439,7 +2449,6 @@ function Style() {
       .settings-row{ display:flex; gap:8px; align-items:center; }
       .settings-row input{ flex:1; }
       .partner-row{ display:flex; gap:8px; align-items:center; }
-      .pin-locked{ font-size:11.5px; color:var(--ink-soft); background:var(--surface-2); border:1px dashed var(--border); border-radius:7px; padding:8px 12px; min-width:80px; text-align:center; }
       .partner-row input:first-child{ flex:1; }
 
       @media (max-width:820px){
