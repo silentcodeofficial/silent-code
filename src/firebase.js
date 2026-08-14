@@ -1,5 +1,12 @@
 import { initializeApp } from "firebase/app";
 import { getFirestore, doc, getDoc, setDoc } from "firebase/firestore";
+import {
+  getAuth,
+  signInWithEmailAndPassword,
+  signOut,
+  sendPasswordResetEmail,
+  onAuthStateChanged,
+} from "firebase/auth";
 
 const firebaseConfig = {
   apiKey: "AIzaSyCSQ5xxXI5xl2HJ8C2GSRqB0OhHBKR0plo",
@@ -12,6 +19,24 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app);
+export const auth = getAuth(app);
+
+export function watchAuth(callback) {
+  return onAuthStateChanged(auth, callback);
+}
+
+export async function signIn(email, password) {
+  const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
+  return cred.user;
+}
+
+export async function signOutUser() {
+  await signOut(auth);
+}
+
+export async function resetPassword(email) {
+  await sendPasswordResetEmail(auth, email.trim());
+}
 
 // Each top-level data category lives in its own Firestore document,
 // so no single document ever approaches Firestore's 1MB-per-document limit.
@@ -47,10 +72,11 @@ export function defaultAppData() {
         "بوابة دفع إلكتروني",
       ],
       partners: [
-        { id: "partner_1", name: "سعيد", percent: 50, pin: "1990" },
-        { id: "partner_2", name: "عبدالله", percent: 50, pin: "2525" },
+        { id: "partner_1", name: "سعيد", percent: 50, email: "" },
+        { id: "partner_2", name: "عبدالله", percent: 50, email: "" },
       ],
       devPercent: 50,
+      businessInfo: { phone: "", address: "", instagram: "", note: "" },
     },
     nextInvoiceNo: 1001,
   };
