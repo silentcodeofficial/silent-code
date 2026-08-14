@@ -2009,15 +2009,24 @@ function emptyEquipment() { return { id: uid("equip"), code: "", date: todayStr(
 
 function EquipmentTab({ data, persist, currentUser }) {
   const [form, setForm] = useState({ ...emptyEquipment(), code: nextCode(data.equipment, "EQ-") });
+  const [editingId, setEditingId] = useState(null);
   const [confirmState, setConfirmState] = useState(null);
 
-  function add() {
+  function save() {
     if (!form.title.trim() || !form.cost) return;
-    const newItem = { ...form, code: form.code || nextCode(data.equipment, "EQ-"), title: form.title.trim(), createdBy: currentUser?.name };
-    const nextEquipment = [...data.equipment, newItem];
-    persist({ ...data, equipment: nextEquipment });
-    setForm({ ...emptyEquipment(), code: nextCode(nextEquipment, "EQ-") });
+    if (editingId) {
+      persist({ ...data, equipment: data.equipment.map((e) => (e.id === editingId ? { ...form, title: form.title.trim() } : e)) });
+      setForm({ ...emptyEquipment(), code: nextCode(data.equipment, "EQ-") });
+      setEditingId(null);
+    } else {
+      const newItem = { ...form, code: form.code || nextCode(data.equipment, "EQ-"), title: form.title.trim(), createdBy: currentUser?.name };
+      const nextEquipment = [...data.equipment, newItem];
+      persist({ ...data, equipment: nextEquipment });
+      setForm({ ...emptyEquipment(), code: nextCode(nextEquipment, "EQ-") });
+    }
   }
+  function startEdit(e) { setForm(e); setEditingId(e.id); }
+  function cancelEdit() { setForm({ ...emptyEquipment(), code: nextCode(data.equipment, "EQ-") }); setEditingId(null); }
   function remove(id) {
     setConfirmState({
       message: "تأكيد حذف هذا العنصر؟",
@@ -2051,7 +2060,7 @@ function EquipmentTab({ data, persist, currentUser }) {
       </div>
 
       <div className="panel">
-        <div className="panel-head"><h3>إضافة معدة / أصل ثابت</h3></div>
+        <div className="panel-head"><h3>{editingId ? "تعديل معدة / أصل ثابت" : "إضافة معدة / أصل ثابت"}</h3></div>
         <div className="form-row four">
           <Field label="الرقم المرجعي"><input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="مثال: EQ-001" /></Field>
           <Field label="اسم العنصر"><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="مثال: قوارير خلط ستانلس" /></Field>
@@ -2060,7 +2069,12 @@ function EquipmentTab({ data, persist, currentUser }) {
           <Field label="التاريخ"><input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
         </div>
         <Field label="ملاحظات (اختياري)"><input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></Field>
-        <button className="btn-primary" onClick={add} disabled={!form.title.trim() || !form.cost}><Plus size={16} /> إضافة</button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn-primary" onClick={save} disabled={!form.title.trim() || !form.cost}>
+            {editingId ? "حفظ التعديل" : <><Plus size={16} /> إضافة</>}
+          </button>
+          {editingId && <button className="btn-ghost" onClick={cancelEdit}>إلغاء</button>}
+        </div>
       </div>
 
       {data.equipment.length === 0 ? (
@@ -2079,7 +2093,12 @@ function EquipmentTab({ data, persist, currentUser }) {
                   <td className="num">{fmt(e.cost)} ر.ع</td>
                   <td>{e.note}</td>
                   <td>{e.createdBy && <span className="badge green">{e.createdBy}</span>}</td>
-                  <td><button className="icon-btn danger" onClick={() => remove(e.id)}><Trash2 size={14} /></button></td>
+                  <td>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button className="icon-btn" onClick={() => startEdit(e)}><Pencil size={13} /></button>
+                      <button className="icon-btn danger" onClick={() => remove(e.id)}><Trash2 size={14} /></button>
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -2097,11 +2116,19 @@ function emptyBranding() { return { id: uid("brand"), date: todayStr(), title: "
 
 function BrandingTab({ data, persist, currentUser }) {
   const [form, setForm] = useState(emptyBranding());
-  function add() {
+  const [editingId, setEditingId] = useState(null);
+  function save() {
     if (!form.title.trim() || !form.cost) return;
-    persist({ ...data, branding: [...data.branding, { ...form, title: form.title.trim(), createdBy: currentUser?.name }] });
+    if (editingId) {
+      persist({ ...data, branding: data.branding.map((b) => (b.id === editingId ? { ...form, title: form.title.trim() } : b)) });
+    } else {
+      persist({ ...data, branding: [...data.branding, { ...form, title: form.title.trim(), createdBy: currentUser?.name }] });
+    }
     setForm(emptyBranding());
+    setEditingId(null);
   }
+  function startEdit(b) { setForm(b); setEditingId(b.id); }
+  function cancelEdit() { setForm(emptyBranding()); setEditingId(null); }
   function remove(id) { persist({ ...data, branding: data.branding.filter((b) => b.id !== id) }); }
   const total = data.branding.reduce((s, b) => s + (Number(b.cost) || 0), 0);
 
@@ -2113,14 +2140,19 @@ function BrandingTab({ data, persist, currentUser }) {
       </div>
 
       <div className="panel">
-        <div className="panel-head"><h3>إضافة مصروف تأسيسي</h3></div>
+        <div className="panel-head"><h3>{editingId ? "تعديل مصروف تأسيسي" : "إضافة مصروف تأسيسي"}</h3></div>
         <div className="form-row four">
           <Field label="البند"><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="مثال: تصميم الشعار" /></Field>
           <Field label="التكلفة (ر.ع)"><input type="number" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} /></Field>
           <Field label="التاريخ"><input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
           <Field label="ملاحظات"><input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></Field>
         </div>
-        <button className="btn-primary" onClick={add} disabled={!form.title.trim() || !form.cost}><Plus size={16} /> إضافة</button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn-primary" onClick={save} disabled={!form.title.trim() || !form.cost}>
+            {editingId ? "حفظ التعديل" : <><Plus size={16} /> إضافة</>}
+          </button>
+          {editingId && <button className="btn-ghost" onClick={cancelEdit}>إلغاء</button>}
+        </div>
       </div>
 
       {data.branding.length === 0 ? (
@@ -2134,7 +2166,12 @@ function BrandingTab({ data, persist, currentUser }) {
                 <tr key={b.id}>
                   <td>{b.date}</td><td className="strong">{b.title}</td><td className="num">{fmt(b.cost)} ر.ع</td><td>{b.note}</td>
                   <td>{b.createdBy && <span className="badge green">{b.createdBy}</span>}</td>
-                  <td><button className="icon-btn danger" onClick={() => remove(b.id)}><Trash2 size={14} /></button></td>
+                  <td>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button className="icon-btn" onClick={() => startEdit(b)}><Pencil size={13} /></button>
+                      <button className="icon-btn danger" onClick={() => remove(b.id)}><Trash2 size={14} /></button>
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>
