@@ -50,6 +50,7 @@ function defaultData() {
         { id: uid("partner"), name: "عبدالله", percent: 50, pin: "1234" },
       ],
       devPercent: 50,
+      businessInfo: { phone: "", address: "", instagram: "", note: "" },
     },
     nextInvoiceNo: 1001,
   };
@@ -125,18 +126,34 @@ function invoiceComputed(inv) {
 
 const PRINT_DOC_STYLES = `
   * { box-sizing: border-box; }
-  body { font-family: 'Cairo', 'Segoe UI', Tahoma, Arial, sans-serif; direction: rtl; padding: 30px; color: #111; margin: 0; }
-  .print-head { display: flex; justify-content: space-between; border-bottom: 2px solid #111; padding-bottom: 12px; margin-bottom: 16px; }
-  .print-brand { font-weight: 800; font-size: 20px; }
-  .print-sub { font-size: 12px; color: #555; }
-  .print-meta { font-size: 12px; text-align: left; }
-  .print-customer { margin-bottom: 14px; font-size: 13px; }
-  table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
-  th, td { border: 1px solid #999; padding: 8px 10px; font-size: 12.5px; text-align: right; }
-  .totals { text-align: left; font-size: 12.5px; margin-bottom: 10px; }
-  .total-line { font-weight: 800; font-size: 15px; text-align: left; margin-top: 6px; }
-  .note { margin-top: 10px; font-size: 12px; color: #444; }
-  .foot { margin-top: 30px; text-align: center; font-size: 11px; color: #777; }
+  body { font-family: 'Cairo', 'Segoe UI', Tahoma, Arial, sans-serif; direction: rtl; margin: 0; color: #22302B; background: #fff; }
+  .sheet { max-width: 780px; margin: 0 auto; padding: 0 36px 36px; }
+  .accent-bar { height: 8px; background: linear-gradient(90deg, #0E6E5B, #17a382); }
+  .print-head { display: flex; justify-content: space-between; align-items: flex-start; padding-top: 26px; padding-bottom: 18px; border-bottom: 1px solid #E3DCCB; margin-bottom: 20px; }
+  .print-brand { font-weight: 800; font-size: 24px; letter-spacing: 1px; color: #0E6E5B; }
+  .print-tagline { font-size: 11px; color: #8A9490; margin-top: 2px; }
+  .biz-info { font-size: 11px; color: #6B7770; margin-top: 8px; line-height: 1.7; }
+  .doc-title { font-size: 13px; font-weight: 700; color: #6B7770; text-align: left; margin-bottom: 6px; letter-spacing: .5px; }
+  .invoice-badge { display: inline-block; background: #0E6E5B; color: #fff; font-weight: 800; font-size: 15px; padding: 5px 14px; border-radius: 999px; margin-bottom: 8px; }
+  .print-meta { font-size: 12px; text-align: left; color: #444; line-height: 1.9; }
+  .info-grid { display: flex; gap: 14px; margin-bottom: 20px; }
+  .info-box { flex: 1; background: #FBF8F2; border: 1px solid #E3DCCB; border-radius: 10px; padding: 12px 14px; }
+  .info-box-title { font-size: 10.5px; font-weight: 700; color: #0E6E5B; margin-bottom: 6px; letter-spacing: .3px; }
+  .info-box div { font-size: 12.5px; color: #333; line-height: 1.8; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 18px; }
+  thead th { background: #0E6E5B; color: #fff; font-size: 11.5px; font-weight: 700; padding: 10px; text-align: right; }
+  thead th:first-child { border-radius: 8px 0 0 0; }
+  thead th:last-child { border-radius: 0 8px 0 0; }
+  tbody td { padding: 9px 10px; font-size: 12.5px; border-bottom: 1px solid #EFEAE0; }
+  tbody tr:nth-child(even) { background: #FBF8F2; }
+  .totals-wrap { display: flex; justify-content: flex-end; margin-bottom: 20px; }
+  .totals { min-width: 260px; font-size: 12.5px; }
+  .totals-row { display: flex; justify-content: space-between; padding: 5px 0; color: #555; }
+  .grand-total { display: flex; justify-content: space-between; background: #0E6E5B; color: #fff; padding: 10px 14px; border-radius: 9px; font-weight: 800; font-size: 15px; margin-top: 6px; }
+  .note { margin-top: 10px; font-size: 12px; color: #444; background: #FBF8F2; border-radius: 8px; padding: 10px 12px; }
+  .foot { margin-top: 34px; text-align: center; border-top: 1px solid #E3DCCB; padding-top: 16px; }
+  .foot-thanks { font-size: 13.5px; font-weight: 700; color: #0E6E5B; margin-bottom: 4px; }
+  .foot-note { font-size: 11px; color: #8A9490; }
 `;
 
 function openPrintWindow(bodyHTML) {
@@ -158,12 +175,13 @@ function openPrintWindow(bodyHTML) {
 
 function printInvoiceNow(invoice, data) {
   const computed = invoiceComputed(invoice);
+  const biz = data.settings.businessInfo || {};
   const rows = computed.items
     .filter((it) => it.productId)
     .map((it) => {
       const prod = data.products.find((p) => p.id === it.productId);
       return `<tr>
-        <td>${prod?.name || "—"}${it.free ? " (هدية)" : ""}</td>
+        <td>${prod?.name || "—"}${it.free ? " 🎁 هدية" : ""}</td>
         <td>${it.qty}</td>
         <td>${fmt(it.price)}</td>
         <td>${it.lineDiscount ? fmt(it.lineDiscount) : "—"}</td>
@@ -171,30 +189,65 @@ function printInvoiceNow(invoice, data) {
       </tr>`;
     })
     .join("");
+
+  const bizLines = [
+    biz.phone && `📞 ${biz.phone}`,
+    biz.address && `📍 ${biz.address}`,
+    biz.instagram && `📷 ${biz.instagram}`,
+  ].filter(Boolean).join(" &nbsp;&nbsp;·&nbsp;&nbsp; ");
+
   const html = `
-    <div class="print-head">
-      <div><div class="print-brand">SILENT CODE</div><div class="print-sub">فاتورة بيع</div></div>
-      <div class="print-meta">
-        <div>رقم الفاتورة: ${invoice.number}</div>
-        <div>التاريخ: ${invoice.date}</div>
-        ${invoice.paymentMethod ? `<div>طريقة الدفع: ${invoice.paymentMethod}</div>` : ""}
+    <div class="accent-bar"></div>
+    <div class="sheet">
+      <div class="print-head">
+        <div>
+          <div class="print-brand">SILENT CODE</div>
+          <div class="print-tagline">صناعة وتغليف العطور</div>
+          ${bizLines ? `<div class="biz-info">${bizLines}</div>` : ""}
+        </div>
+        <div>
+          <div class="doc-title">فاتورة بيع</div>
+          <div class="invoice-badge">#${invoice.number}</div>
+          <div class="print-meta">
+            <div>${invoice.date}</div>
+            ${invoice.paymentMethod ? `<div>${invoice.paymentMethod}</div>` : ""}
+          </div>
+        </div>
+      </div>
+
+      <div class="info-grid">
+        <div class="info-box">
+          <div class="info-box-title">معلومات العميل</div>
+          <div>${invoice.customerName || "—"}</div>
+          ${invoice.customerPhone ? `<div>${invoice.customerPhone}</div>` : ""}
+        </div>
+        <div class="info-box">
+          <div class="info-box-title">التسليم</div>
+          <div>${invoice.deliveryType === "delivery" ? "توصيل" : "استلام من المصنع"}</div>
+          ${invoice.deliveryType === "delivery" && invoice.deliveryAddress ? `<div>${invoice.deliveryAddress}</div>` : ""}
+        </div>
+      </div>
+
+      <table>
+        <thead><tr><th>الصنف</th><th>الكمية</th><th>سعر الوحدة</th><th>خصم</th><th>الإجمالي</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+
+      <div class="totals-wrap">
+        <div class="totals">
+          <div class="totals-row"><span>المجموع</span><span>${fmt(computed.subtotal)} ر.ع</span></div>
+          ${computed.invoiceDiscountAmount > 0 ? `<div class="totals-row"><span>خصم الفاتورة</span><span>-${fmt(computed.invoiceDiscountAmount)} ر.ع</span></div>` : ""}
+          <div class="grand-total"><span>الإجمالي الكلي</span><span>${fmt(computed.grandTotal)} ر.ع</span></div>
+        </div>
+      </div>
+
+      ${invoice.note ? `<div class="note">ملاحظات: ${invoice.note}</div>` : ""}
+
+      <div class="foot">
+        <div class="foot-thanks">شكرًا لثقتكم بنا 🤍</div>
+        <div class="foot-note">${biz.note || "SILENT CODE"}</div>
       </div>
     </div>
-    <div class="print-customer">
-      <div>العميل: ${invoice.customerName || "—"}</div>
-      ${invoice.customerPhone ? `<div>الهاتف: ${invoice.customerPhone}</div>` : ""}
-    </div>
-    <table>
-      <thead><tr><th>الصنف</th><th>الكمية</th><th>سعر الوحدة</th><th>خصم</th><th>الإجمالي</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    <div class="totals">
-      <div>المجموع: ${fmt(computed.subtotal)} ر.ع</div>
-      ${computed.invoiceDiscountAmount > 0 ? `<div>خصم الفاتورة: ${fmt(computed.invoiceDiscountAmount)} ر.ع</div>` : ""}
-      <div class="total-line">الإجمالي الكلي: ${fmt(computed.grandTotal)} ر.ع</div>
-    </div>
-    ${invoice.note ? `<div class="note">ملاحظات: ${invoice.note}</div>` : ""}
-    <div class="foot">شكرًا لتعاملكم معنا</div>
   `;
   openPrintWindow(html);
 }
@@ -211,25 +264,33 @@ function printPeriodNow(period, data) {
       <td>${fmt(invoiceComputed(inv).grandTotal)}</td>
     </tr>`)
     .join("");
-  const methodRows = Object.entries(byMethod).map(([method, amt]) => `<div>${method}: ${fmt(amt)} ر.ع</div>`).join("");
+  const methodRows = Object.entries(byMethod).map(([method, amt]) => `<div class="totals-row"><span>${method}</span><span>${fmt(amt)} ر.ع</span></div>`).join("");
   const html = `
-    <div class="print-head">
-      <div><div class="print-brand">SILENT CODE</div><div class="print-sub">كشف حساب فترة</div></div>
-      <div class="print-meta">
-        <div>من: ${dateFrom || "البداية"}</div>
-        <div>إلى: ${dateTo || "الآن"}</div>
+    <div class="accent-bar"></div>
+    <div class="sheet">
+      <div class="print-head">
+        <div>
+          <div class="print-brand">SILENT CODE</div>
+          <div class="print-tagline">كشف حساب فترة (للاستخدام الداخلي)</div>
+        </div>
+        <div class="print-meta">
+          <div>من: ${dateFrom || "البداية"}</div>
+          <div>إلى: ${dateTo || "الآن"}</div>
+        </div>
       </div>
+      <table>
+        <thead><tr><th>رقم الفاتورة</th><th>التاريخ</th><th>العميل</th><th>طريقة الدفع</th><th>الإجمالي</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="totals-wrap">
+        <div class="totals">
+          <div class="info-box-title" style="margin-bottom:8px;">التوزيع حسب طريقة الدفع</div>
+          ${methodRows}
+          <div class="grand-total"><span>الإجمالي الكلي</span><span>${fmt(total)} ر.ع</span></div>
+        </div>
+      </div>
+      <div class="foot"><div class="foot-note">عدد الفواتير: ${invoices.length}</div></div>
     </div>
-    <table>
-      <thead><tr><th>رقم الفاتورة</th><th>التاريخ</th><th>العميل</th><th>طريقة الدفع</th><th>الإجمالي</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    <div class="totals">
-      <div style="font-weight:700; margin-bottom:4px;">التوزيع حسب طريقة الدفع</div>
-      ${methodRows}
-      <div class="total-line">الإجمالي الكلي: ${fmt(total)} ر.ع</div>
-    </div>
-    <div class="foot">عدد الفواتير: ${invoices.length}</div>
   `;
   openPrintWindow(html);
 }
@@ -1331,6 +1392,7 @@ function emptyInvoice(nextNo, defaultMethod) {
     id: uid("inv"), number: nextNo, date: todayStr(), customerName: "", customerPhone: "",
     paymentMethod: defaultMethod || "", note: "",
     discountType: "fixed", discountValue: "",
+    deliveryType: "pickup", deliveryAddress: "",
     items: [{ id: uid("it"), productId: "", qty: 1, unitPrice: "", discount: "", free: false }],
   };
 }
@@ -1427,6 +1489,7 @@ function InvoicesTab({ data, persist, currentUser }) {
                   <span className="ticket-no">فاتورة #{inv.number}</span>
                   <span className="ticket-date">{inv.date}</span>
                   {inv.paymentMethod && <span className="badge blue">{inv.paymentMethod}</span>}
+                  {inv.deliveryType === "delivery" && <span className="badge amber">توصيل</span>}
                   {inv.createdBy && <span className="badge green">{inv.createdBy}</span>}
                 </div>
                 <div className="ticket-customer">{inv.customerName || "عميل بدون اسم"}</div>
@@ -1518,6 +1581,18 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
                 {methods.map((m) => <option key={m} value={m}>{m}</option>)}
               </select>
             </Field>
+          </div>
+
+          <div className="form-row">
+            <Field label="التسليم">
+              <select value={inv.deliveryType} onChange={(e) => set("deliveryType", e.target.value)}>
+                <option value="pickup">استلام من المصنع</option>
+                <option value="delivery">توصيل</option>
+              </select>
+            </Field>
+            {inv.deliveryType === "delivery" && (
+              <Field label="عنوان التوصيل"><input value={inv.deliveryAddress} onChange={(e) => set("deliveryAddress", e.target.value)} placeholder="الولاية / المنطقة / تفاصيل الموقع" /></Field>
+            )}
           </div>
 
           {matched && (
@@ -1970,6 +2045,8 @@ function SettingsTab({ data, persist }) {
   function removePartner(id) { setSettings({ ...s, partners: s.partners.filter((p) => p.id !== id) }); }
 
   const partnersSum = s.partners.reduce((sum, p) => sum + (Number(p.percent) || 0), 0);
+  const biz = s.businessInfo || { phone: "", address: "", instagram: "", note: "" };
+  function setBiz(field, val) { setSettings({ ...s, businessInfo: { ...biz, [field]: val } }); }
 
   function exportBackup() {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -2011,6 +2088,16 @@ function SettingsTab({ data, persist }) {
   return (
     <div className="page">
       <PageHead eyebrow="الإعدادات" title="إعدادات البرنامج" desc="طرق الدفع، الشراكة، وتوزيع الأرباح" />
+
+      <div className="panel">
+        <div className="panel-head"><h3>معلومات البراند بالفاتورة</h3><span className="panel-sub">تظهر تلقائيًا بأعلى كل فاتورة مطبوعة تروح للعميل</span></div>
+        <div className="form-row four">
+          <Field label="رقم الهاتف / واتساب"><input value={biz.phone} onChange={(e) => setBiz("phone", e.target.value)} placeholder="+968 9xxxxxxx" /></Field>
+          <Field label="العنوان / الموقع"><input value={biz.address} onChange={(e) => setBiz("address", e.target.value)} placeholder="مسقط، عمان" /></Field>
+          <Field label="إنستقرام (اختياري)"><input value={biz.instagram} onChange={(e) => setBiz("instagram", e.target.value)} placeholder="@silentcode.om" /></Field>
+        </div>
+        <Field label="ملاحظة أسفل الفاتورة (اختياري)"><input value={biz.note} onChange={(e) => setBiz("note", e.target.value)} placeholder="مثال: منتجاتنا يدوية 100%، الرد خلال 24 ساعة" /></Field>
+      </div>
 
       <div className="panel">
         <div className="panel-head"><h3>نسخة احتياطية</h3><span className="panel-sub">احتفظ بنسخة على جهازك بشكل دوري، ضمان إضافي غير الاعتماد على الرابط فقط</span></div>
