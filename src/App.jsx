@@ -2005,16 +2005,18 @@ function LossesTab({ data, persist, currentUser }) {
 
 /* ============================== equipment ============================== */
 
-function emptyEquipment() { return { id: uid("equip"), date: todayStr(), title: "", qty: 1, cost: "", note: "" }; }
+function emptyEquipment() { return { id: uid("equip"), code: "", date: todayStr(), title: "", qty: 1, cost: "", note: "" }; }
 
 function EquipmentTab({ data, persist, currentUser }) {
-  const [form, setForm] = useState(emptyEquipment());
+  const [form, setForm] = useState({ ...emptyEquipment(), code: nextCode(data.equipment, "EQ-") });
   const [confirmState, setConfirmState] = useState(null);
 
   function add() {
     if (!form.title.trim() || !form.cost) return;
-    persist({ ...data, equipment: [...data.equipment, { ...form, title: form.title.trim(), createdBy: currentUser?.name }] });
-    setForm(emptyEquipment());
+    const newItem = { ...form, code: form.code || nextCode(data.equipment, "EQ-"), title: form.title.trim(), createdBy: currentUser?.name };
+    const nextEquipment = [...data.equipment, newItem];
+    persist({ ...data, equipment: nextEquipment });
+    setForm({ ...emptyEquipment(), code: nextCode(nextEquipment, "EQ-") });
   }
   function remove(id) {
     setConfirmState({
@@ -2051,6 +2053,7 @@ function EquipmentTab({ data, persist, currentUser }) {
       <div className="panel">
         <div className="panel-head"><h3>إضافة معدة / أصل ثابت</h3></div>
         <div className="form-row four">
+          <Field label="الرقم المرجعي"><input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="مثال: EQ-001" /></Field>
           <Field label="اسم العنصر"><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="مثال: قوارير خلط ستانلس" /></Field>
           <Field label="الكمية"><input type="number" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} /></Field>
           <Field label="التكلفة الإجمالية (ر.ع)"><input type="number" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} /></Field>
@@ -2065,10 +2068,11 @@ function EquipmentTab({ data, persist, currentUser }) {
       ) : (
         <div className="table-wrap">
           <table>
-            <thead><tr><th>التاريخ</th><th>العنصر</th><th>الكمية</th><th>التكلفة</th><th>ملاحظات</th><th>بواسطة</th><th></th></tr></thead>
+            <thead><tr><th>الرقم المرجعي</th><th>التاريخ</th><th>العنصر</th><th>الكمية</th><th>التكلفة</th><th>ملاحظات</th><th>بواسطة</th><th></th></tr></thead>
             <tbody>
               {[...data.equipment].reverse().map((e) => (
                 <tr key={e.id}>
+                  <td><span className="badge blue">{e.code || "—"}</span></td>
                   <td>{e.date}</td>
                   <td className="strong">{e.title}</td>
                   <td className="num">{e.qty || "—"}</td>
