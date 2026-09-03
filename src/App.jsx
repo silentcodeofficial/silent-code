@@ -348,6 +348,7 @@ function productRevenueQty(data, productId) {
   return { qty, revenue };
 }
 
+/* ---- unified overhead: bags, consumables, marketing, and recurring subscriptions
 function computeAllProductAgg(data) {
   const totalRevenue = data.products.reduce((s, p) => s + productRevenueQty(data, p.id).revenue, 0);
   const totalGeneralMarketing = data.marketing.filter((m) => !m.productId).reduce((s, m) => s + (Number(m.cost) || 0), 0);
@@ -1497,6 +1498,7 @@ function emptyInvoice(nextNo, defaultMethod) {
     paymentMethod: defaultMethod || "", note: "",
     discountType: "fixed", discountValue: "",
     deliveryType: "pickup", deliveryAddress: "",
+    overheadUsage: [],
     items: [{ id: uid("it"), productId: "", qty: 1, unitPrice: "", discount: "", free: false }],
   };
 }
@@ -1509,17 +1511,36 @@ function InvoicesTab({ data, persist, currentUser }) {
   const methods = data.settings.paymentMethods || [];
 
   function startNew() { setEditing(emptyInvoice(data.nextInvoiceNo, methods[0])); }
+
+  function applyOverheadStockDelta(materials, oldUsage, newUsage) {
+    // add back old quantities, then deduct new quantities
+    let result = materials;
+    (oldUsage || []).forEach((u) => {
+      result = result.map((m) => (m.id === u.materialId ? { ...m, stock: (Number(m.stock) || 0) + (Number(u.qty) || 0) } : m));
+    });
+    (newUsage || []).forEach((u) => {
+      result = result.map((m) => (m.id === u.materialId ? { ...m, stock: (Number(m.stock) || 0) - (Number(u.qty) || 0) } : m));
+    });
+    return result;
+  }
+
   function save(inv) {
-    const exists = data.invoices.some((x) => x.id === inv.id);
+    const existing = data.invoices.find((x) => x.id === inv.id);
+    const exists = !!existing;
     const invoices = exists ? data.invoices.map((x) => (x.id === inv.id ? inv : x)) : [...data.invoices, { ...inv, createdBy: currentUser?.name }];
     const nextInvoiceNo = exists ? data.nextInvoiceNo : data.nextInvoiceNo + 1;
-    persist({ ...data, invoices, nextInvoiceNo });
+    const materials = applyOverheadStockDelta(data.materials, existing?.overheadUsage, inv.overheadUsage);
+    persist({ ...data, invoices, nextInvoiceNo, materials });
     setEditing(null);
   }
   function remove(id) {
+    const inv = data.invoices.find((x) => x.id === id);
     setConfirmState({
       message: "تأكيد حذف الفاتورة؟",
-      onConfirm: () => persist({ ...data, invoices: data.invoices.filter((i) => i.id !== id) }),
+      onConfirm: () => {
+        const materials = applyOverheadStockDelta(data.materials, inv?.overheadUsage, []);
+        persist({ ...data, invoices: data.invoices.filter((i) => i.id !== id), materials });
+      },
     });
   }
   function invoiceTotal(inv) { return invoiceComputed(inv).grandTotal; }
@@ -1660,6 +1681,16 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
   function addItem() { setInv({ ...inv, items: [...inv.items, { id: uid("it"), productId: "", qty: 1, unitPrice: "", discount: "", free: false }] }); }
   function removeItem(id) { setInv({ ...inv, items: inv.items.filter((it) => it.id !== id) }); }
 
+  function addOverheadUsage() {
+    setInv({ ...inv, overheadUsage: [...(inv.overheadUsage || []), { id: uid("ou"), materialId: "", qty: "" }] });
+  }
+  function setOverheadUsage(id, field, val) {
+    setInv({ ...inv, overheadUsage: (inv.overheadUsage || []).map((u) => (u.id === id ? { ...u, [field]: val } : u)) });
+  }
+  function removeOverheadUsage(id) {
+    setInv({ ...inv, overheadUsage: (inv.overheadUsage || []).filter((u) => u.id !== id) });
+  }
+
   const computed = useMemo(() => invoiceComputed(inv), [inv]);
 
   const stockIssues = useMemo(() => {
@@ -1761,6 +1792,30 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
             })}
             <button className="link-btn" onClick={addItem}><Plus size={14} /> إضافة صنف</button>
           </div>
+
+          {data.materials.length > 0 && (
+            <>
+              <div className="sub-head">استهلاك مواد إضافية (داخلي فقط، ما يظهر بالفاتورة المطبوعة)</div>
+              <p className="field-hint" style={{ marginBottom: 8 }}>مثلاً كيس واحد يغلّف عطرين — سجّله هنا مرة وحدة بس عشان يخصم من مخزون الأكياس، بعيد عن أصناف الفاتورة اللي يشوفها العميل.</p>
+              <div className="trip-costs">
+                {(inv.overheadUsage || []).length === 0 && <p className="empty-sub" style={{ margin: 0 }}>ما فيه استهلاك مسجّل — اضغط + لو تبي تسجل.</p>}
+                {(inv.overheadUsage || []).map((u) => {
+                  const mat = data.materials.find((m) => m.id === u.materialId);
+                  return (
+                    <div className="overhead-usage-row" key={u.id}>
+                      <select value={u.materialId} onChange={(e) => setOverheadUsage(u.id, "materialId", e.target.value)}>
+                        <option value="">اختر مادة</option>
+                        {data.materials.map((m) => <option key={m.id} value={m.id}>{materialLabel(m)} — متوفر: {m.stock || 0}</option>)}
+                      </select>
+                      <input type="number" placeholder={`الكمية${mat ? " (" + mat.unit + ")" : ""}`} value={u.qty} onChange={(e) => setOverheadUsage(u.id, "qty", e.target.value)} />
+                      <button className="icon-btn danger" onClick={() => removeOverheadUsage(u.id)}><Trash2 size={14} /></button>
+                    </div>
+                  );
+                })}
+                <button className="link-btn" onClick={addOverheadUsage}><Plus size={14} /> إضافة استهلاك</button>
+              </div>
+            </>
+          )}
 
           <div className="sub-head">خصم على الفاتورة كاملة (اختياري)</div>
           <div className="form-row">
@@ -2498,6 +2553,7 @@ function Style() {
       .purchase-line-row{ display:grid; grid-template-columns:1fr 110px 110px 80px 34px; gap:8px; align-items:center; }
       .purchase-line-extra{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-top:8px; }
       .purchase-extra-row{ display:grid; grid-template-columns:1fr 110px 80px 34px; gap:8px; align-items:center; margin-bottom:6px; }
+      .overhead-usage-row{ display:grid; grid-template-columns:1fr 130px 34px; gap:8px; align-items:center; margin-bottom:6px; }
       .invoice-item-block{ border:1px solid var(--border); border-radius:10px; padding:8px; margin-bottom:4px; }
       .invoice-item-row{ display:grid; grid-template-columns:1.6fr .7fr .9fr .9fr 34px; gap:8px; align-items:center; }
       .invoice-item-extra{ display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap; }
@@ -2564,7 +2620,7 @@ function Style() {
         .sidebar-foot{ display:none; }
         .content{ padding:18px; }
         .material-row{ grid-template-columns:1fr 100px 30px; }
-        .purchase-line-row, .purchase-extra-row, .purchase-line-extra{ grid-template-columns:1fr; }
+        .purchase-line-row, .purchase-extra-row, .purchase-line-extra, .overhead-usage-row{ grid-template-columns:1fr; }
         .invoice-item-row{ grid-template-columns:1fr; }
       }
     `}</style>
