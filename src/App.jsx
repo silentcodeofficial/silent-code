@@ -348,7 +348,6 @@ function productRevenueQty(data, productId) {
   return { qty, revenue };
 }
 
-/* ---- unified overhead: bags, consumables, marketing, and recurring subscriptions
 function computeAllProductAgg(data) {
   const totalRevenue = data.products.reduce((s, p) => s + productRevenueQty(data, p.id).revenue, 0);
   const totalGeneralMarketing = data.marketing.filter((m) => !m.productId).reduce((s, m) => s + (Number(m.cost) || 0), 0);
