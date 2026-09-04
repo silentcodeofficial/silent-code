@@ -50,6 +50,7 @@ const LIST_KEYS = [
   "losses",
   "branding",
   "equipment",
+  "notifications",
 ];
 
 export function defaultAppData() {
@@ -63,6 +64,7 @@ export function defaultAppData() {
     losses: [],
     branding: [],
     equipment: [],
+    notifications: [],
     settings: {
       paymentMethods: [
         "نقدًا (كاش)",
@@ -77,6 +79,14 @@ export function defaultAppData() {
       ],
       devPercent: 50,
       businessInfo: { phone: "", address: "", instagram: "", note: "" },
+      // running bank-balance baseline: once set, the dashboard adds every
+      // invoice dated after `setAt` and subtracts every expense dated after
+      // `setAt`, so the displayed balance always stays live without anyone
+      // having to touch this number by hand.
+      bankBalance: { amount: null, setAt: "", setBy: "" },
+      // a change request waiting on the *other* partner's approval; null
+      // when there is nothing pending.
+      pendingBalanceRequest: null,
     },
     nextInvoiceNo: 1001,
   };
