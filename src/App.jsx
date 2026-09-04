@@ -9,7 +9,7 @@ import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   PieChart, Pie, Cell, Legend
 } from "recharts";
-import { loadAppData, saveAppData, defaultAppData, watchAuth, signIn, signOutUser, resetPassword } from "./firebase";
+import { loadAppData, saveAppData, defaultAppData, watchAuth, signIn, signOutUser, resetPassword, ensureDailyBackup, listBackupDates, loadBackup } from "./firebase";
 
 /* ============================== helpers ============================== */
 
@@ -543,6 +543,7 @@ export default function CostingApp() {
       try {
         const loaded = await loadAppData();
         if (!cancelled) setData(loaded);
+        ensureDailyBackup(loaded); // fire-and-forget, runs in the background
       } catch (e) {
         console.error("load error", e);
         if (!cancelled) setData(defaultAppData());
@@ -2306,7 +2307,29 @@ function SettingsTab({ data, persist, currentUser }) {
   const fileInputRef = useRef(null);
   const [importMsg, setImportMsg] = useState("");
   const [confirmState, setConfirmState] = useState(null);
+  const [backupDates, setBackupDates] = useState(null); // null = loading
+  const [restoreMsg, setRestoreMsg] = useState("");
   function setSettings(next) { persist({ ...data, settings: next }); }
+
+  useEffect(() => {
+    listBackupDates().then(setBackupDates).catch(() => setBackupDates([]));
+  }, []);
+
+  function restoreFromAutoBackup(dateStr) {
+    setConfirmState({
+      message: `استعادة نسخة ${dateStr} راح تستبدل كل بياناتك الحالية بهالنسخة. متأكد؟`,
+      onConfirm: async () => {
+        setRestoreMsg("جاري الاستعادة...");
+        try {
+          const restored = await loadBackup(dateStr);
+          await persist(restored);
+          setRestoreMsg(`تمت الاستعادة من نسخة ${dateStr} بنجاح ✅`);
+        } catch {
+          setRestoreMsg("صار خطأ أثناء الاستعادة، حاول مرة ثانية.");
+        }
+      },
+    });
+  }
 
   function addMethod() { setSettings({ ...s, paymentMethods: [...s.paymentMethods, "طريقة جديدة"] }); }
   function editMethod(i, val) { const arr = [...s.paymentMethods]; arr[i] = val; setSettings({ ...s, paymentMethods: arr }); }
@@ -2382,6 +2405,31 @@ function SettingsTab({ data, persist, currentUser }) {
         </div>
         {importMsg && <p className="field-hint" style={{ marginTop: 8 }}>{importMsg}</p>}
         <p className="field-hint" style={{ marginTop: 8 }}>نصيحة: نزّل نسخة كل فترة (أسبوعيًا مثلاً) واحفظها بمكان آمن (إيميلك، درايف...) — لو صار أي طارئ على الرابط أو التخزين، تقدر تستعيد بياناتك كاملة من هذا الملف.</p>
+      </div>
+
+      <div className="panel">
+        <div className="panel-head"><h3>النسخ الاحتياطية التلقائية</h3><span className="panel-sub">تُؤخذ تلقائيًا بالخلفية أول ما تفتح البرنامج كل يوم — بدون أي تدخل منك، وما تلمس بياناتك الحالية إطلاقًا</span></div>
+        {backupDates === null ? (
+          <p className="field-hint">جاري التحميل...</p>
+        ) : backupDates.length === 0 ? (
+          <p className="field-hint">ما فيه نسخ محفوظة بعد — أول نسخة تلقائية تُؤخذ أول ما تفتح البرنامج اليوم.</p>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>التاريخ</th><th></th></tr></thead>
+              <tbody>
+                {backupDates.map((d) => (
+                  <tr key={d}>
+                    <td className="strong">{d}</td>
+                    <td><button className="icon-btn" onClick={() => restoreFromAutoBackup(d)}>استعادة هذي النسخة</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {restoreMsg && <p className="field-hint" style={{ marginTop: 8 }}>{restoreMsg}</p>}
+        <p className="field-hint" style={{ marginTop: 8 }}>النسخ تتراكم بدون حد أقصى ولا حذف تلقائي — تضل محفوظة كلها للأبد، منفصلة تمامًا عن بياناتك الحية.</p>
       </div>
 
       <div className="panel">
