@@ -3,7 +3,8 @@ import {
   LayoutDashboard, Boxes, Factory, Package, Receipt, Megaphone, AlertTriangle,
   Building2, Settings as SettingsIcon, Plus, Trash2, Printer, X, TrendingUp,
   TrendingDown, Loader2, ChevronLeft, Users, PackageX, Sparkles, AlertCircle,
-  ShoppingCart, Wallet, Pencil, Wrench
+  ShoppingCart, Wallet, Pencil, Wrench, ClipboardList, Landmark, Bell, Lock,
+  CheckCircle2, XCircle
 } from "lucide-react";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -113,6 +114,74 @@ function invoiceComputed(inv) {
     return { ...it, netRevenue: it.afterLineDiscount - invoiceDiscountAmount * share };
   });
   return { items: itemsWithNet, subtotal, invoiceDiscountAmount, grandTotal };
+}
+
+/* ---- money in / money out (used by reports + bank balance) ---- */
+
+// landedTotal already includes this line's share of extra costs, and is
+// stored in OMR at save time — see savePurchase().
+function purchaseTotal(pur) {
+  return (pur.lines || []).reduce((s, l) => s + (Number(l.landedTotal) || 0), 0);
+}
+
+// One flat, chronologically-sortable list of every outgoing payment:
+// material purchases, marketing/sampling spend, manufacturing losses,
+// equipment/asset buys, and branding/setup costs.
+function allExpenses(data) {
+  const out = [];
+  (data.purchases || []).forEach((p) =>
+    out.push({ id: p.id, date: p.date, category: "مشتريات مواد", amount: purchaseTotal(p), note: p.note, createdBy: p.createdBy })
+  );
+  (data.marketing || []).forEach((m) =>
+    out.push({ id: m.id, date: m.date, category: "تسويق وسامبلات", amount: Number(m.cost) || 0, note: m.title, createdBy: m.createdBy })
+  );
+  (data.losses || []).forEach((l) =>
+    out.push({ id: l.id, date: l.date, category: "خسائر تصنيع", amount: Number(l.costTotal) || 0, note: l.note, createdBy: l.createdBy })
+  );
+  (data.equipment || []).forEach((e) =>
+    out.push({ id: e.id, date: e.date, category: "معدات وأصول ثابتة", amount: Number(e.cost) || 0, note: e.title, createdBy: e.createdBy })
+  );
+  (data.branding || []).forEach((b) =>
+    out.push({ id: b.id, date: b.date, category: "تأسيس وبراند", amount: Number(b.cost) || 0, note: b.title, createdBy: b.createdBy })
+  );
+  return out.sort((a, b) => (a.date < b.date ? 1 : -1));
+}
+
+function allIncome(data) {
+  return (data.invoices || [])
+    .map((inv) => ({ id: inv.id, date: inv.date, category: inv.paymentMethod || "بدون طريقة دفع", amount: invoiceComputed(inv).grandTotal, note: inv.customerName, createdBy: inv.createdBy }))
+    .sort((a, b) => (a.date < b.date ? 1 : -1));
+}
+
+function inRange(row, from, to) {
+  if (from && row.date < from) return false;
+  if (to && row.date > to) return false;
+  return true;
+}
+
+// Live bank balance = the amount the user confirmed as of `setAt`, plus
+// every invoice dated after that day, minus every expense dated after it.
+// Nothing is ever mutated in place, so editing/deleting an old record keeps
+// the number correct automatically instead of drifting.
+function computeBankBalance(data) {
+  const bb = data.settings.bankBalance;
+  if (!bb || bb.amount === null || bb.amount === undefined || bb.amount === "") return null;
+  const since = bb.setAt || "";
+  const incomeAfter = allIncome(data).filter((r) => r.date > since).reduce((s, r) => s + r.amount, 0);
+  const expenseAfter = allExpenses(data).filter((r) => r.date > since).reduce((s, r) => s + r.amount, 0);
+  return {
+    base: Number(bb.amount) || 0,
+    incomeAfter,
+    expenseAfter,
+    current: (Number(bb.amount) || 0) + incomeAfter - expenseAfter,
+    setAt: bb.setAt,
+    setBy: bb.setBy,
+  };
+}
+
+function pushNotification(data, notif) {
+  const notifications = [...(data.notifications || []), { id: uid("ntf"), date: todayStr(), readBy: [], ...notif }].slice(-50);
+  return notifications;
 }
 
 /* ---- printing: fully isolated popup window, independent of the app's own CSS/layout ---- */
@@ -601,6 +670,7 @@ export default function CostingApp() {
 
   const NAV = [
     { id: "dashboard", label: "الرئيسية", icon: LayoutDashboard },
+    { id: "reports", label: "التقارير المالية", icon: ClipboardList },
     { id: "materials", label: "المخزون والمواد", icon: Boxes },
     { id: "products", label: "المنتجات والوصفات", icon: Package },
     { id: "production", label: "دفعات الإنتاج", icon: Factory },
@@ -643,7 +713,8 @@ export default function CostingApp() {
       </aside>
 
       <main className="content">
-        {tab === "dashboard" && <Dashboard data={data} />}
+        {tab === "dashboard" && <Dashboard data={data} persist={persist} currentUser={currentUser} />}
+        {tab === "reports" && <ReportsTab data={data} />}
         {tab === "materials" && <MaterialsTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "products" && <ProductsTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "production" && <ProductionTab data={data} persist={persist} currentUser={currentUser} />}
@@ -663,7 +734,7 @@ export default function CostingApp() {
 
 /* ============================== dashboard ============================== */
 
-function Dashboard({ data }) {
+function Dashboard({ data, persist, currentUser }) {
   const agg = useMemo(() => computeAllProductAgg(data), [data]);
   const totals = useMemo(() => {
     const totalRevenue = agg.reduce((s, a) => s + a.revenue, 0);
@@ -728,6 +799,8 @@ function Dashboard({ data }) {
           </span>
         </div>
       )}
+
+      <BankBalancePanel data={data} persist={persist} currentUser={currentUser} />
 
       <div className="panel">
         <div className="panel-head">
@@ -808,6 +881,290 @@ function Dashboard({ data }) {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+/* ============================== bank balance (with partner approval) ============================== */
+
+function BankBalancePanel({ data, persist, currentUser }) {
+  const [showSetForm, setShowSetForm] = useState(false);
+  const [showRequestForm, setShowRequestForm] = useState(false);
+  const [amountInput, setAmountInput] = useState("");
+  const [note, setNote] = useState("");
+
+  const balance = computeBankBalance(data);
+  const pending = data.settings.pendingBalanceRequest;
+  const canApprove = pending && pending.requestedBy !== currentUser?.name;
+
+  function confirmInitial() {
+    const amount = Number(amountInput);
+    if (amountInput === "" || isNaN(amount)) return;
+    const notifications = pushNotification(data, {
+      type: "balance_set",
+      message: `${currentUser?.name || "شخص"} حدّد الرصيد البنكي الأولي بمبلغ ${fmt(amount)} ر.ع`,
+    });
+    persist({
+      ...data,
+      notifications,
+      settings: { ...data.settings, bankBalance: { amount, setAt: todayStr(), setBy: currentUser?.name || "" } },
+    });
+    setAmountInput("");
+    setShowSetForm(false);
+  }
+
+  function submitRequest() {
+    const amount = Number(amountInput);
+    if (amountInput === "" || isNaN(amount)) return;
+    const request = { id: uid("bbr"), newAmount: amount, requestedBy: currentUser?.name || "", requestedAt: todayStr(), note: note.trim() };
+    const notifications = pushNotification(data, {
+      type: "balance_request",
+      message: `${currentUser?.name || "شخص"} طلب تصحيح الرصيد البنكي إلى ${fmt(amount)} ر.ع — بانتظار موافقة الشريك`,
+    });
+    persist({ ...data, notifications, settings: { ...data.settings, pendingBalanceRequest: request } });
+    setAmountInput("");
+    setNote("");
+    setShowRequestForm(false);
+  }
+
+  function approveRequest() {
+    if (!pending) return;
+    const notifications = pushNotification(data, {
+      type: "balance_approved",
+      message: `${currentUser?.name || "شخص"} وافق على تصحيح الرصيد البنكي إلى ${fmt(pending.newAmount)} ر.ع (طلبه ${pending.requestedBy})`,
+    });
+    persist({
+      ...data,
+      notifications,
+      settings: {
+        ...data.settings,
+        bankBalance: { amount: pending.newAmount, setAt: todayStr(), setBy: pending.requestedBy },
+        pendingBalanceRequest: null,
+      },
+    });
+  }
+
+  function rejectRequest() {
+    if (!pending) return;
+    const notifications = pushNotification(data, {
+      type: "balance_rejected",
+      message: `${currentUser?.name || "شخص"} رفض طلب ${pending.requestedBy} بتصحيح الرصيد إلى ${fmt(pending.newAmount)} ر.ع`,
+    });
+    persist({ ...data, notifications, settings: { ...data.settings, pendingBalanceRequest: null } });
+  }
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <h3><Landmark size={16} style={{ verticalAlign: "-3px", marginLeft: 6 }} />الرصيد البنكي</h3>
+        {balance && <span className="panel-sub">آخر تثبيت: {balance.setAt} بواسطة {balance.setBy || "—"}</span>}
+      </div>
+
+      {!balance ? (
+        showSetForm ? (
+          <div className="form-row">
+            <Field label="الرصيد المتوفر بالحساب الآن (ر.ع)">
+              <input type="number" value={amountInput} onChange={(e) => setAmountInput(e.target.value)} autoFocus />
+            </Field>
+            <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
+              <button className="btn-primary" onClick={confirmInitial} disabled={amountInput === ""}>تثبيت الرصيد</button>
+              <button className="btn-ghost" onClick={() => setShowSetForm(false)}>إلغاء</button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <p className="field-hint" style={{ marginBottom: 10 }}>
+              ما فيه رصيد مسجّل بعد. بعد ما تسجّل كل المشتريات والمصاريف المتأخرة، حط هنا كم المبلغ المتوفر بالحساب الحين — بعدها البرنامج يحسبه لك تلقائيًا: يزيد مع كل فاتورة بيع، وينقص مع كل مصروف جديد، بدون ما تعدّله يدويًا.
+            </p>
+            <button className="btn-primary" onClick={() => setShowSetForm(true)}><Wallet size={15} /> تحديد الرصيد الحالي</button>
+          </>
+        )
+      ) : (
+        <>
+          <div className="kpi-row">
+            <div className="kpi-card" style={{ "--accent": balance.current >= 0 ? "var(--success)" : "var(--danger)" }}>
+              <Landmark size={16} className="kpi-icon" />
+              <div className="kpi-label">الرصيد الحالي (تلقائي)</div>
+              <div className="kpi-value">{fmt(balance.current)} <span className="unit">ر.ع</span></div>
+            </div>
+          </div>
+          <div className="calc-summary">
+            <div><span>الرصيد المثبّت بتاريخ {balance.setAt}</span><strong>{fmt(balance.base)} ر.ع</strong></div>
+            <div><span>+ مبيعات بعد هذا التاريخ</span><strong className="pos">{fmt(balance.incomeAfter)} ر.ع</strong></div>
+            <div><span>- مصاريف بعد هذا التاريخ</span><strong className="neg">{fmt(balance.expenseAfter)} ر.ع</strong></div>
+          </div>
+
+          {pending ? (
+            canApprove ? (
+              <div className="alert-banner" style={{ background: "#FFF4E5", color: "#8A5A00", borderColor: "#F3DDAE", marginTop: 12 }}>
+                <Bell size={16} />
+                <span style={{ flex: 1 }}>
+                  {pending.requestedBy} طلب تصحيح الرصيد إلى <strong>{fmt(pending.newAmount)} ر.ع</strong> بتاريخ {pending.requestedAt}
+                  {pending.note && ` — ملاحظة: ${pending.note}`}
+                </span>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="btn-primary" onClick={approveRequest}><CheckCircle2 size={14} /> موافقة</button>
+                  <button className="btn-ghost" onClick={rejectRequest}><XCircle size={14} /> رفض</button>
+                </div>
+              </div>
+            ) : (
+              <div className="alert-banner" style={{ marginTop: 12 }}>
+                <Lock size={16} />
+                <span>طلبك بتصحيح الرصيد إلى {fmt(pending.newAmount)} ر.ع لسا بانتظار موافقة الشريك.</span>
+              </div>
+            )
+          ) : showRequestForm ? (
+            <div className="form-row" style={{ marginTop: 12 }}>
+              <Field label="الرصيد الصحيح الجديد (ر.ع)">
+                <input type="number" value={amountInput} onChange={(e) => setAmountInput(e.target.value)} autoFocus />
+              </Field>
+              <Field label="سبب التصحيح (اختياري)"><input value={note} onChange={(e) => setNote(e.target.value)} /></Field>
+              <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
+                <button className="btn-primary" onClick={submitRequest} disabled={amountInput === ""}>إرسال الطلب</button>
+                <button className="btn-ghost" onClick={() => setShowRequestForm(false)}>إلغاء</button>
+              </div>
+            </div>
+          ) : (
+            <button className="btn-ghost" style={{ marginTop: 12 }} onClick={() => setShowRequestForm(true)}>
+              <Lock size={14} /> الرقم غلط؟ اطلب تصحيح الرصيد (يحتاج موافقة الشريك)
+            </button>
+          )}
+
+          {data.notifications && data.notifications.length > 0 && (
+            <div className="mini-list" style={{ marginTop: 14 }}>
+              <div className="mini-list-title">آخر تنبيهات الرصيد</div>
+              {[...data.notifications].reverse().slice(0, 5).map((n) => (
+                <div className="mini-list-row" key={n.id}>
+                  <span>{n.message}</span>
+                  <span className="num" style={{ opacity: 0.6 }}>{n.date}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ============================== financial reports ============================== */
+
+function ReportsTab({ data }) {
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+
+  const income = useMemo(() => allIncome(data).filter((r) => inRange(r, dateFrom, dateTo)), [data, dateFrom, dateTo]);
+  const expenses = useMemo(() => allExpenses(data).filter((r) => inRange(r, dateFrom, dateTo)), [data, dateFrom, dateTo]);
+
+  const totalIncome = income.reduce((s, r) => s + r.amount, 0);
+  const totalExpenses = expenses.reduce((s, r) => s + r.amount, 0);
+  const net = totalIncome - totalExpenses;
+
+  const expenseByCategory = {};
+  expenses.forEach((r) => { expenseByCategory[r.category] = (expenseByCategory[r.category] || 0) + r.amount; });
+
+  function quickRange(days) {
+    const to = todayStr();
+    const from = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+    setDateFrom(from);
+    setDateTo(to);
+  }
+  function clearRange() { setDateFrom(""); setDateTo(""); }
+
+  return (
+    <div className="page">
+      <PageHead
+        eyebrow="المال"
+        title="التقارير المالية"
+        desc="كل شي دخل علينا وكل شي طلع منّا، بأي فترة زمنية تختارها"
+        action={<button className="btn-ghost" onClick={() => window.print()}><Printer size={15} /> طباعة</button>}
+      />
+
+      <div className="panel">
+        <div className="panel-head"><h3>الفترة الزمنية</h3></div>
+        <div className="form-row">
+          <Field label="من تاريخ"><input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} /></Field>
+          <Field label="إلى تاريخ"><input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 6, flexWrap: "wrap" }}>
+            <button className="btn-ghost" onClick={() => quickRange(0)}>اليوم</button>
+            <button className="btn-ghost" onClick={() => quickRange(7)}>آخر أسبوع</button>
+            <button className="btn-ghost" onClick={() => quickRange(30)}>آخر شهر</button>
+            {(dateFrom || dateTo) && <button className="btn-ghost" onClick={clearRange}>كل الفترة</button>}
+          </div>
+        </div>
+      </div>
+
+      <div className="kpi-row">
+        <div className="kpi-card" style={{ "--accent": "var(--teal)" }}>
+          <TrendingUp size={16} className="kpi-icon" />
+          <div className="kpi-label">إجمالي الدخل بالفترة</div>
+          <div className="kpi-value">{fmt(totalIncome)} <span className="unit">ر.ع</span></div>
+        </div>
+        <div className="kpi-card" style={{ "--accent": "var(--danger)" }}>
+          <TrendingDown size={16} className="kpi-icon" />
+          <div className="kpi-label">إجمالي المصروفات بالفترة</div>
+          <div className="kpi-value">{fmt(totalExpenses)} <span className="unit">ر.ع</span></div>
+        </div>
+        <div className="kpi-card" style={{ "--accent": net >= 0 ? "var(--success)" : "var(--danger)" }}>
+          {net >= 0 ? <TrendingUp size={16} className="kpi-icon" /> : <TrendingDown size={16} className="kpi-icon" />}
+          <div className="kpi-label">الصافي</div>
+          <div className="kpi-value">{fmt(net)} <span className="unit">ر.ع</span></div>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-head"><h3>الدخل ({income.length})</h3></div>
+        {income.length === 0 ? (
+          <Empty icon={Receipt} title="ما فيه دخل بهالفترة" sub="جرب توسّع نطاق التاريخ." />
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>التاريخ</th><th>العميل</th><th>طريقة الدفع</th><th>المبلغ</th></tr></thead>
+              <tbody>
+                {income.map((r) => (
+                  <tr key={r.id}>
+                    <td>{r.date}</td>
+                    <td>{r.note || "—"}</td>
+                    <td>{r.category}</td>
+                    <td className="num pos">{fmt(r.amount)} ر.ع</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="panel">
+        <div className="panel-head"><h3>المصروفات ({expenses.length})</h3></div>
+        {Object.keys(expenseByCategory).length > 0 && (
+          <div className="mini-list" style={{ marginBottom: 14 }}>
+            <div className="mini-list-title">حسب النوع</div>
+            {Object.entries(expenseByCategory).map(([cat, total]) => (
+              <div className="mini-list-row" key={cat}><span>{cat}</span><span className="num">{fmt(total)} ر.ع</span></div>
+            ))}
+          </div>
+        )}
+        {expenses.length === 0 ? (
+          <Empty icon={ShoppingCart} title="ما فيه مصروفات بهالفترة" sub="جرب توسّع نطاق التاريخ." />
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>التاريخ</th><th>النوع</th><th>التفاصيل</th><th>المبلغ</th></tr></thead>
+              <tbody>
+                {expenses.map((r) => (
+                  <tr key={r.id}>
+                    <td>{r.date}</td>
+                    <td><span className="badge blue">{r.category}</span></td>
+                    <td>{r.note || "—"}</td>
+                    <td className="num neg">{fmt(r.amount)} ر.ع</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1796,7 +2153,7 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
           {data.materials.length > 0 && (
             <>
               <div className="sub-head">استهلاك مواد إضافية (داخلي فقط، ما يظهر بالفاتورة المطبوعة)</div>
-              <p className="field-hint" style={{ marginBottom: 8 }}>مثلاً كيس واحد يغلّف عطرين — سجّله هنا مرة وحدة بس عشان يخصم من مخزون الأكياس، بعيد عن أصناف الفاتورة اللي يشوفها العميل.</p>
+              <p className="field-hint" style={{ marginBottom: 8 }}>مثلاً كيس واحد يغلّف 3 عطور — سجّله هنا مرة وحدة بس عشان يخصم من مخزون الأكياس، بعيد عن أصناف الفاتورة اللي يشوفها العميل.</p>
               <div className="trip-costs">
                 {(inv.overheadUsage || []).length === 0 && <p className="empty-sub" style={{ margin: 0 }}>ما فيه استهلاك مسجّل — اضغط + لو تبي تسجل.</p>}
                 {(inv.overheadUsage || []).map((u) => {
