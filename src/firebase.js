@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getFirestore, doc, getDoc, setDoc } from "firebase/firestore";
+import { getFirestore, doc, getDoc, setDoc, collection, getDocs } from "firebase/firestore";
 import {
   getAuth,
   signInWithEmailAndPassword,
@@ -113,4 +113,63 @@ export async function saveAppData(prev, next) {
     writes.push(setDoc(doc(db, "app", "meta"), nextMeta));
   }
   await Promise.all(writes);
+}
+
+/* ---- automatic daily backups: stored in their own "backups" collection,
+   one document per category per day (same split-by-category approach as the
+   live data, so a backup can never approach Firestore's 1MB document limit).
+   Backups are pure snapshots that are only ever ADDED, never modified or
+   auto-deleted — your live data is never touched by this. ---- */
+
+function todayDateStr() {
+  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+}
+
+export async function ensureDailyBackup(data) {
+  try {
+    const today = todayDateStr();
+    const markerId = `${today}_meta`;
+    const markerSnap = await getDoc(doc(db, "backups", markerId));
+    if (markerSnap.exists()) return; // already backed up today, nothing to do
+
+    const writes = LIST_KEYS.map((key) =>
+      setDoc(doc(db, "backups", `${today}_${key}`), { list: data[key] || [] })
+    );
+    writes.push(
+      setDoc(doc(db, "backups", markerId), {
+        createdAt: today,
+        settings: data.settings,
+        nextInvoiceNo: data.nextInvoiceNo,
+      })
+    );
+    await Promise.all(writes);
+  } catch (e) {
+    console.error("backup error", e);
+  }
+}
+
+export async function listBackupDates() {
+  const snap = await getDocs(collection(db, "backups"));
+  const dates = new Set();
+  snap.forEach((d) => {
+    if (d.id.endsWith("_meta")) dates.add(d.id.replace("_meta", ""));
+  });
+  return [...dates].sort().reverse(); // newest first
+}
+
+export async function loadBackup(dateStr) {
+  const result = defaultAppData();
+  for (const key of LIST_KEYS) {
+    const snap = await getDoc(doc(db, "backups", `${dateStr}_${key}`));
+    if (snap.exists() && Array.isArray(snap.data().list)) {
+      result[key] = snap.data().list;
+    }
+  }
+  const metaSnap = await getDoc(doc(db, "backups", `${dateStr}_meta`));
+  if (metaSnap.exists()) {
+    const meta = metaSnap.data();
+    if (meta.settings) result.settings = meta.settings;
+    if (meta.nextInvoiceNo) result.nextInvoiceNo = meta.nextInvoiceNo;
+  }
+  return result;
 }
