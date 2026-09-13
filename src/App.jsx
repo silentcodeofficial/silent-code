@@ -3,14 +3,13 @@ import {
   LayoutDashboard, Boxes, Factory, Package, Receipt, Megaphone, AlertTriangle,
   Building2, Settings as SettingsIcon, Plus, Trash2, Printer, X, TrendingUp,
   TrendingDown, Loader2, ChevronLeft, Users, PackageX, Sparkles, AlertCircle,
-  ShoppingCart, Wallet, Pencil, Wrench, ClipboardList, Landmark, Bell, Lock,
-  CheckCircle2, XCircle
+  ShoppingCart, Wallet, Pencil, Wrench, FileText
 } from "lucide-react";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   PieChart, Pie, Cell, Legend
 } from "recharts";
-import { loadAppData, saveAppData, defaultAppData, watchAuth, signIn, signOutUser, resetPassword, ensureDailyBackup, listBackupDates, loadBackup } from "./firebase";
+import { loadAppData, saveAppData, defaultAppData, watchAuth, signIn, signOutUser, resetPassword, ensureDailyBackup, listBackupDates, loadBackup, uploadPurchaseInvoiceFile, deletePurchaseInvoiceFile } from "./firebase";
 
 /* ============================== helpers ============================== */
 
@@ -25,6 +24,55 @@ const todayStr = () => new Date().toISOString().slice(0, 10);
 
 const UNITS = ["مل", "جرام", "قطعة"];
 const AED_RATE = 0.105; // 1000 AED = 105 OMR
+
+/* ---- purchase invoice attachments: compress images and wrap them into a
+   single-page PDF client-side before uploading, so Firebase Storage only
+   ever receives small, consistent PDF files regardless of the original
+   photo's size. Existing PDFs are uploaded as-is. ---- */
+
+async function imageFileToCompressedPdfBlob(file) {
+  const { jsPDF } = await import("jspdf");
+  const imgBitmap = await createImageBitmap(file);
+  const maxDim = 1600;
+  let { width, height } = imgBitmap;
+  const scale = Math.min(1, maxDim / Math.max(width, height));
+  width = Math.round(width * scale);
+  height = Math.round(height * scale);
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(imgBitmap, 0, 0, width, height);
+  const jpegDataUrl = canvas.toDataURL("image/jpeg", 0.6);
+  const orientation = width >= height ? "l" : "p";
+  const pdf = new jsPDF({ orientation, unit: "px", format: [width, height] });
+  pdf.addImage(jpegDataUrl, "JPEG", 0, 0, width, height);
+  return pdf.output("blob");
+}
+
+async function prepareInvoiceFileForUpload(file) {
+  if (file.type === "application/pdf") return file;
+  if (file.type.startsWith("image/")) return imageFileToCompressedPdfBlob(file);
+  return file; // unknown type, upload as-is
+}
+
+function sanitizeForFileName(s) {
+  return String(s || "").replace(/[^\w\u0600-\u06FF-]+/g, "_").slice(0, 60);
+}
+
+function buildPurchaseFileName(purchase, materials, label) {
+  const num = purchase.number || "بدون_رقم";
+  const date = purchase.date || todayStr();
+  const matNames = (purchase.lines || [])
+    .filter((l) => l.materialId)
+    .map((l) => materials.find((m) => m.id === l.materialId)?.name)
+    .filter(Boolean)
+    .slice(0, 3)
+    .join("-");
+  const details = label || matNames || "شراء";
+  const unique = uid("att");
+  return `شراء-${sanitizeForFileName(num)}-${sanitizeForFileName(date)}-${sanitizeForFileName(details)}-${unique}.pdf`;
+}
 const toOMR = (amount, currency) => (currency === "AED" ? (Number(amount) || 0) * AED_RATE : Number(amount) || 0);
 
 /* ---- cost engine ---- */
@@ -114,74 +162,6 @@ function invoiceComputed(inv) {
     return { ...it, netRevenue: it.afterLineDiscount - invoiceDiscountAmount * share };
   });
   return { items: itemsWithNet, subtotal, invoiceDiscountAmount, grandTotal };
-}
-
-/* ---- money in / money out (used by reports + bank balance) ---- */
-
-// landedTotal already includes this line's share of extra costs, and is
-// stored in OMR at save time — see savePurchase().
-function purchaseTotal(pur) {
-  return (pur.lines || []).reduce((s, l) => s + (Number(l.landedTotal) || 0), 0);
-}
-
-// One flat, chronologically-sortable list of every outgoing payment:
-// material purchases, marketing/sampling spend, manufacturing losses,
-// equipment/asset buys, and branding/setup costs.
-function allExpenses(data) {
-  const out = [];
-  (data.purchases || []).forEach((p) =>
-    out.push({ id: p.id, date: p.date, category: "مشتريات مواد", amount: purchaseTotal(p), note: p.note, createdBy: p.createdBy })
-  );
-  (data.marketing || []).forEach((m) =>
-    out.push({ id: m.id, date: m.date, category: "تسويق وسامبلات", amount: Number(m.cost) || 0, note: m.title, createdBy: m.createdBy })
-  );
-  (data.losses || []).forEach((l) =>
-    out.push({ id: l.id, date: l.date, category: "خسائر تصنيع", amount: Number(l.costTotal) || 0, note: l.note, createdBy: l.createdBy })
-  );
-  (data.equipment || []).forEach((e) =>
-    out.push({ id: e.id, date: e.date, category: "معدات وأصول ثابتة", amount: Number(e.cost) || 0, note: e.title, createdBy: e.createdBy })
-  );
-  (data.branding || []).forEach((b) =>
-    out.push({ id: b.id, date: b.date, category: "تأسيس وبراند", amount: Number(b.cost) || 0, note: b.title, createdBy: b.createdBy })
-  );
-  return out.sort((a, b) => (a.date < b.date ? 1 : -1));
-}
-
-function allIncome(data) {
-  return (data.invoices || [])
-    .map((inv) => ({ id: inv.id, date: inv.date, category: inv.paymentMethod || "بدون طريقة دفع", amount: invoiceComputed(inv).grandTotal, note: inv.customerName, createdBy: inv.createdBy }))
-    .sort((a, b) => (a.date < b.date ? 1 : -1));
-}
-
-function inRange(row, from, to) {
-  if (from && row.date < from) return false;
-  if (to && row.date > to) return false;
-  return true;
-}
-
-// Live bank balance = the amount the user confirmed as of `setAt`, plus
-// every invoice dated after that day, minus every expense dated after it.
-// Nothing is ever mutated in place, so editing/deleting an old record keeps
-// the number correct automatically instead of drifting.
-function computeBankBalance(data) {
-  const bb = data.settings.bankBalance;
-  if (!bb || bb.amount === null || bb.amount === undefined || bb.amount === "") return null;
-  const since = bb.setAt || "";
-  const incomeAfter = allIncome(data).filter((r) => r.date > since).reduce((s, r) => s + r.amount, 0);
-  const expenseAfter = allExpenses(data).filter((r) => r.date > since).reduce((s, r) => s + r.amount, 0);
-  return {
-    base: Number(bb.amount) || 0,
-    incomeAfter,
-    expenseAfter,
-    current: (Number(bb.amount) || 0) + incomeAfter - expenseAfter,
-    setAt: bb.setAt,
-    setBy: bb.setBy,
-  };
-}
-
-function pushNotification(data, notif) {
-  const notifications = [...(data.notifications || []), { id: uid("ntf"), date: todayStr(), readBy: [], ...notif }].slice(-50);
-  return notifications;
 }
 
 /* ---- printing: fully isolated popup window, independent of the app's own CSS/layout ---- */
@@ -670,8 +650,8 @@ export default function CostingApp() {
 
   const NAV = [
     { id: "dashboard", label: "الرئيسية", icon: LayoutDashboard },
-    { id: "reports", label: "التقارير المالية", icon: ClipboardList },
     { id: "materials", label: "المخزون والمواد", icon: Boxes },
+    { id: "purchaseLog", label: "سجل المشتريات", icon: FileText },
     { id: "products", label: "المنتجات والوصفات", icon: Package },
     { id: "production", label: "دفعات الإنتاج", icon: Factory },
     { id: "invoices", label: "فواتير البيع", icon: Receipt },
@@ -713,9 +693,9 @@ export default function CostingApp() {
       </aside>
 
       <main className="content">
-        {tab === "dashboard" && <Dashboard data={data} persist={persist} currentUser={currentUser} />}
-        {tab === "reports" && <ReportsTab data={data} />}
+        {tab === "dashboard" && <Dashboard data={data} />}
         {tab === "materials" && <MaterialsTab data={data} persist={persist} currentUser={currentUser} />}
+        {tab === "purchaseLog" && <PurchaseLogTab data={data} />}
         {tab === "products" && <ProductsTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "production" && <ProductionTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "invoices" && <InvoicesTab data={data} persist={persist} currentUser={currentUser} />}
@@ -734,7 +714,7 @@ export default function CostingApp() {
 
 /* ============================== dashboard ============================== */
 
-function Dashboard({ data, persist, currentUser }) {
+function Dashboard({ data }) {
   const agg = useMemo(() => computeAllProductAgg(data), [data]);
   const totals = useMemo(() => {
     const totalRevenue = agg.reduce((s, a) => s + a.revenue, 0);
@@ -799,8 +779,6 @@ function Dashboard({ data, persist, currentUser }) {
           </span>
         </div>
       )}
-
-      <BankBalancePanel data={data} persist={persist} currentUser={currentUser} />
 
       <div className="panel">
         <div className="panel-head">
@@ -885,300 +863,17 @@ function Dashboard({ data, persist, currentUser }) {
   );
 }
 
-/* ============================== bank balance (with partner approval) ============================== */
-
-function BankBalancePanel({ data, persist, currentUser }) {
-  const [showSetForm, setShowSetForm] = useState(false);
-  const [showRequestForm, setShowRequestForm] = useState(false);
-  const [amountInput, setAmountInput] = useState("");
-  const [note, setNote] = useState("");
-
-  const balance = computeBankBalance(data);
-  const pending = data.settings.pendingBalanceRequest;
-  const canApprove = pending && pending.requestedBy !== currentUser?.name;
-
-  function confirmInitial() {
-    const amount = Number(amountInput);
-    if (amountInput === "" || isNaN(amount)) return;
-    const notifications = pushNotification(data, {
-      type: "balance_set",
-      message: `${currentUser?.name || "شخص"} حدّد الرصيد البنكي الأولي بمبلغ ${fmt(amount)} ر.ع`,
-    });
-    persist({
-      ...data,
-      notifications,
-      settings: { ...data.settings, bankBalance: { amount, setAt: todayStr(), setBy: currentUser?.name || "" } },
-    });
-    setAmountInput("");
-    setShowSetForm(false);
-  }
-
-  function submitRequest() {
-    const amount = Number(amountInput);
-    if (amountInput === "" || isNaN(amount)) return;
-    const request = { id: uid("bbr"), newAmount: amount, requestedBy: currentUser?.name || "", requestedAt: todayStr(), note: note.trim() };
-    const notifications = pushNotification(data, {
-      type: "balance_request",
-      message: `${currentUser?.name || "شخص"} طلب تصحيح الرصيد البنكي إلى ${fmt(amount)} ر.ع — بانتظار موافقة الشريك`,
-    });
-    persist({ ...data, notifications, settings: { ...data.settings, pendingBalanceRequest: request } });
-    setAmountInput("");
-    setNote("");
-    setShowRequestForm(false);
-  }
-
-  function approveRequest() {
-    if (!pending) return;
-    const notifications = pushNotification(data, {
-      type: "balance_approved",
-      message: `${currentUser?.name || "شخص"} وافق على تصحيح الرصيد البنكي إلى ${fmt(pending.newAmount)} ر.ع (طلبه ${pending.requestedBy})`,
-    });
-    persist({
-      ...data,
-      notifications,
-      settings: {
-        ...data.settings,
-        bankBalance: { amount: pending.newAmount, setAt: todayStr(), setBy: pending.requestedBy },
-        pendingBalanceRequest: null,
-      },
-    });
-  }
-
-  function rejectRequest() {
-    if (!pending) return;
-    const notifications = pushNotification(data, {
-      type: "balance_rejected",
-      message: `${currentUser?.name || "شخص"} رفض طلب ${pending.requestedBy} بتصحيح الرصيد إلى ${fmt(pending.newAmount)} ر.ع`,
-    });
-    persist({ ...data, notifications, settings: { ...data.settings, pendingBalanceRequest: null } });
-  }
-
-  return (
-    <div className="panel">
-      <div className="panel-head">
-        <h3><Landmark size={16} style={{ verticalAlign: "-3px", marginLeft: 6 }} />الرصيد البنكي</h3>
-        {balance && <span className="panel-sub">آخر تثبيت: {balance.setAt} بواسطة {balance.setBy || "—"}</span>}
-      </div>
-
-      {!balance ? (
-        showSetForm ? (
-          <div className="form-row">
-            <Field label="الرصيد المتوفر بالحساب الآن (ر.ع)">
-              <input type="number" value={amountInput} onChange={(e) => setAmountInput(e.target.value)} autoFocus />
-            </Field>
-            <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
-              <button className="btn-primary" onClick={confirmInitial} disabled={amountInput === ""}>تثبيت الرصيد</button>
-              <button className="btn-ghost" onClick={() => setShowSetForm(false)}>إلغاء</button>
-            </div>
-          </div>
-        ) : (
-          <>
-            <p className="field-hint" style={{ marginBottom: 10 }}>
-              ما فيه رصيد مسجّل بعد. بعد ما تسجّل كل المشتريات والمصاريف المتأخرة، حط هنا كم المبلغ المتوفر بالحساب الحين — بعدها البرنامج يحسبه لك تلقائيًا: يزيد مع كل فاتورة بيع، وينقص مع كل مصروف جديد، بدون ما تعدّله يدويًا.
-            </p>
-            <button className="btn-primary" onClick={() => setShowSetForm(true)}><Wallet size={15} /> تحديد الرصيد الحالي</button>
-          </>
-        )
-      ) : (
-        <>
-          <div className="kpi-row">
-            <div className="kpi-card" style={{ "--accent": balance.current >= 0 ? "var(--success)" : "var(--danger)" }}>
-              <Landmark size={16} className="kpi-icon" />
-              <div className="kpi-label">الرصيد الحالي (تلقائي)</div>
-              <div className="kpi-value">{fmt(balance.current)} <span className="unit">ر.ع</span></div>
-            </div>
-          </div>
-          <div className="calc-summary">
-            <div><span>الرصيد المثبّت بتاريخ {balance.setAt}</span><strong>{fmt(balance.base)} ر.ع</strong></div>
-            <div><span>+ مبيعات بعد هذا التاريخ</span><strong className="pos">{fmt(balance.incomeAfter)} ر.ع</strong></div>
-            <div><span>- مصاريف بعد هذا التاريخ</span><strong className="neg">{fmt(balance.expenseAfter)} ر.ع</strong></div>
-          </div>
-
-          {pending ? (
-            canApprove ? (
-              <div className="alert-banner" style={{ background: "#FFF4E5", color: "#8A5A00", borderColor: "#F3DDAE", marginTop: 12 }}>
-                <Bell size={16} />
-                <span style={{ flex: 1 }}>
-                  {pending.requestedBy} طلب تصحيح الرصيد إلى <strong>{fmt(pending.newAmount)} ر.ع</strong> بتاريخ {pending.requestedAt}
-                  {pending.note && ` — ملاحظة: ${pending.note}`}
-                </span>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button className="btn-primary" onClick={approveRequest}><CheckCircle2 size={14} /> موافقة</button>
-                  <button className="btn-ghost" onClick={rejectRequest}><XCircle size={14} /> رفض</button>
-                </div>
-              </div>
-            ) : (
-              <div className="alert-banner" style={{ marginTop: 12 }}>
-                <Lock size={16} />
-                <span>طلبك بتصحيح الرصيد إلى {fmt(pending.newAmount)} ر.ع لسا بانتظار موافقة الشريك.</span>
-              </div>
-            )
-          ) : showRequestForm ? (
-            <div className="form-row" style={{ marginTop: 12 }}>
-              <Field label="الرصيد الصحيح الجديد (ر.ع)">
-                <input type="number" value={amountInput} onChange={(e) => setAmountInput(e.target.value)} autoFocus />
-              </Field>
-              <Field label="سبب التصحيح (اختياري)"><input value={note} onChange={(e) => setNote(e.target.value)} /></Field>
-              <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
-                <button className="btn-primary" onClick={submitRequest} disabled={amountInput === ""}>إرسال الطلب</button>
-                <button className="btn-ghost" onClick={() => setShowRequestForm(false)}>إلغاء</button>
-              </div>
-            </div>
-          ) : (
-            <button className="btn-ghost" style={{ marginTop: 12 }} onClick={() => setShowRequestForm(true)}>
-              <Lock size={14} /> الرقم غلط؟ اطلب تصحيح الرصيد (يحتاج موافقة الشريك)
-            </button>
-          )}
-
-          {data.notifications && data.notifications.length > 0 && (
-            <div className="mini-list" style={{ marginTop: 14 }}>
-              <div className="mini-list-title">آخر تنبيهات الرصيد</div>
-              {[...data.notifications].reverse().slice(0, 5).map((n) => (
-                <div className="mini-list-row" key={n.id}>
-                  <span>{n.message}</span>
-                  <span className="num" style={{ opacity: 0.6 }}>{n.date}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-/* ============================== financial reports ============================== */
-
-function ReportsTab({ data }) {
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
-
-  const income = useMemo(() => allIncome(data).filter((r) => inRange(r, dateFrom, dateTo)), [data, dateFrom, dateTo]);
-  const expenses = useMemo(() => allExpenses(data).filter((r) => inRange(r, dateFrom, dateTo)), [data, dateFrom, dateTo]);
-
-  const totalIncome = income.reduce((s, r) => s + r.amount, 0);
-  const totalExpenses = expenses.reduce((s, r) => s + r.amount, 0);
-  const net = totalIncome - totalExpenses;
-
-  const expenseByCategory = {};
-  expenses.forEach((r) => { expenseByCategory[r.category] = (expenseByCategory[r.category] || 0) + r.amount; });
-
-  function quickRange(days) {
-    const to = todayStr();
-    const from = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
-    setDateFrom(from);
-    setDateTo(to);
-  }
-  function clearRange() { setDateFrom(""); setDateTo(""); }
-
-  return (
-    <div className="page">
-      <PageHead
-        eyebrow="المال"
-        title="التقارير المالية"
-        desc="كل شي دخل علينا وكل شي طلع منّا، بأي فترة زمنية تختارها"
-        action={<button className="btn-ghost" onClick={() => window.print()}><Printer size={15} /> طباعة</button>}
-      />
-
-      <div className="panel">
-        <div className="panel-head"><h3>الفترة الزمنية</h3></div>
-        <div className="form-row">
-          <Field label="من تاريخ"><input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} /></Field>
-          <Field label="إلى تاريخ"><input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
-          <div style={{ display: "flex", alignItems: "flex-end", gap: 6, flexWrap: "wrap" }}>
-            <button className="btn-ghost" onClick={() => quickRange(0)}>اليوم</button>
-            <button className="btn-ghost" onClick={() => quickRange(7)}>آخر أسبوع</button>
-            <button className="btn-ghost" onClick={() => quickRange(30)}>آخر شهر</button>
-            {(dateFrom || dateTo) && <button className="btn-ghost" onClick={clearRange}>كل الفترة</button>}
-          </div>
-        </div>
-      </div>
-
-      <div className="kpi-row">
-        <div className="kpi-card" style={{ "--accent": "var(--teal)" }}>
-          <TrendingUp size={16} className="kpi-icon" />
-          <div className="kpi-label">إجمالي الدخل بالفترة</div>
-          <div className="kpi-value">{fmt(totalIncome)} <span className="unit">ر.ع</span></div>
-        </div>
-        <div className="kpi-card" style={{ "--accent": "var(--danger)" }}>
-          <TrendingDown size={16} className="kpi-icon" />
-          <div className="kpi-label">إجمالي المصروفات بالفترة</div>
-          <div className="kpi-value">{fmt(totalExpenses)} <span className="unit">ر.ع</span></div>
-        </div>
-        <div className="kpi-card" style={{ "--accent": net >= 0 ? "var(--success)" : "var(--danger)" }}>
-          {net >= 0 ? <TrendingUp size={16} className="kpi-icon" /> : <TrendingDown size={16} className="kpi-icon" />}
-          <div className="kpi-label">الصافي</div>
-          <div className="kpi-value">{fmt(net)} <span className="unit">ر.ع</span></div>
-        </div>
-      </div>
-
-      <div className="panel">
-        <div className="panel-head"><h3>الدخل ({income.length})</h3></div>
-        {income.length === 0 ? (
-          <Empty icon={Receipt} title="ما فيه دخل بهالفترة" sub="جرب توسّع نطاق التاريخ." />
-        ) : (
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>التاريخ</th><th>العميل</th><th>طريقة الدفع</th><th>المبلغ</th></tr></thead>
-              <tbody>
-                {income.map((r) => (
-                  <tr key={r.id}>
-                    <td>{r.date}</td>
-                    <td>{r.note || "—"}</td>
-                    <td>{r.category}</td>
-                    <td className="num pos">{fmt(r.amount)} ر.ع</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      <div className="panel">
-        <div className="panel-head"><h3>المصروفات ({expenses.length})</h3></div>
-        {Object.keys(expenseByCategory).length > 0 && (
-          <div className="mini-list" style={{ marginBottom: 14 }}>
-            <div className="mini-list-title">حسب النوع</div>
-            {Object.entries(expenseByCategory).map(([cat, total]) => (
-              <div className="mini-list-row" key={cat}><span>{cat}</span><span className="num">{fmt(total)} ر.ع</span></div>
-            ))}
-          </div>
-        )}
-        {expenses.length === 0 ? (
-          <Empty icon={ShoppingCart} title="ما فيه مصروفات بهالفترة" sub="جرب توسّع نطاق التاريخ." />
-        ) : (
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>التاريخ</th><th>النوع</th><th>التفاصيل</th><th>المبلغ</th></tr></thead>
-              <tbody>
-                {expenses.map((r) => (
-                  <tr key={r.id}>
-                    <td>{r.date}</td>
-                    <td><span className="badge blue">{r.category}</span></td>
-                    <td>{r.note || "—"}</td>
-                    <td className="num neg">{fmt(r.amount)} ر.ع</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 /* ============================== materials / inventory ============================== */
 
 function emptyMaterial() {
   return { id: uid("mat"), code: "", name: "", unit: "مل", stock: "", avgCost: "", minThreshold: "" };
 }
-function emptyPurchase() {
+function emptyPurchase(nextNo) {
   return {
-    id: uid("pur"), date: todayStr(), note: "",
+    id: uid("pur"), number: nextNo, date: todayStr(), note: "",
     lines: [{ id: uid("pl"), materialId: "", qty: "", unitCost: "", currency: "OMR", supplierInvoiceNo: "", supplierName: "", lineNote: "" }],
     extraCosts: [],
+    attachments: [],
   };
 }
 
@@ -1223,7 +918,8 @@ function MaterialsTab({ data, persist, currentUser }) {
       });
     });
     const purchases = [...data.purchases, { ...pur, lines: allocated, extraCosts, createdBy: currentUser?.name }];
-    persist({ ...data, materials, purchases });
+    const nextPurchaseNo = Math.max(Number(data.nextPurchaseNo) || 1001, (Number(pur.number) || 0) + 1);
+    persist({ ...data, materials, purchases, nextPurchaseNo });
     setPurchase(null);
   }
 
@@ -1236,7 +932,7 @@ function MaterialsTab({ data, persist, currentUser }) {
         action={
           <div style={{ display: "flex", gap: 8 }}>
             <button className="btn-ghost" onClick={() => setEditingMat({ ...emptyMaterial(), code: nextCode(data.materials, "M-") })}><Plus size={15} /> مادة جديدة</button>
-            <button className="btn-primary" onClick={() => setPurchase(emptyPurchase())} disabled={data.materials.length === 0}>
+            <button className="btn-primary" onClick={() => setPurchase(emptyPurchase(data.nextPurchaseNo))} disabled={data.materials.length === 0}>
               <ShoppingCart size={15} /> تسجيل شراء
             </button>
           </div>
@@ -1372,6 +1068,7 @@ function MaterialEditor({ material, onSave, onClose }) {
 
 function PurchaseEditor({ purchase, materials, onSave, onClose }) {
   const [pur, setPur] = useState(purchase);
+  const [uploadingIds, setUploadingIds] = useState({});
   function set(f, v) { setPur({ ...pur, [f]: v }); }
   function setLine(id, f, v) { setPur({ ...pur, lines: pur.lines.map((l) => (l.id === id ? { ...l, [f]: v } : l)) }); }
   function addLine() { setPur({ ...pur, lines: [...pur.lines, { id: uid("pl"), materialId: "", qty: "", unitCost: "", currency: "OMR", supplierInvoiceNo: "", supplierName: "", lineNote: "" }] }); }
@@ -1380,15 +1077,39 @@ function PurchaseEditor({ purchase, materials, onSave, onClose }) {
   function addExtra() { setPur({ ...pur, extraCosts: [...pur.extraCosts, { id: uid("ec"), label: "", amount: "", currency: "OMR" }] }); }
   function removeExtra(id) { setPur({ ...pur, extraCosts: pur.extraCosts.filter((e) => e.id !== id) }); }
 
+  async function handleAttachFile(fileList) {
+    const file = fileList?.[0];
+    if (!file) return;
+    const tempId = uid("att");
+    setUploadingIds((u) => ({ ...u, [tempId]: true }));
+    try {
+      const label = window.prompt("وصف مختصر للمرفق (اختياري، مثلاً: فاتورة شركة الورد)", "") || "";
+      const blob = await prepareInvoiceFileForUpload(file);
+      const fileName = buildPurchaseFileName(pur, materials, label);
+      const url = await uploadPurchaseInvoiceFile(fileName, blob);
+      setPur((p) => ({ ...p, attachments: [...(p.attachments || []), { id: tempId, label, fileName, url } ] }));
+    } catch (e) {
+      console.error("attachment upload error", e);
+      alert("صار خطأ أثناء رفع المرفق، حاول مرة ثانية.");
+    }
+    setUploadingIds((u) => { const n = { ...u }; delete n[tempId]; return n; });
+  }
+  function removeAttachment(id) {
+    const att = (pur.attachments || []).find((a) => a.id === id);
+    setPur({ ...pur, attachments: (pur.attachments || []).filter((a) => a.id !== id) });
+    if (att?.fileName) deletePurchaseInvoiceFile(att.fileName);
+  }
+
   const validLines = pur.lines.filter((l) => l.materialId && l.qty);
   const allocated = allocatePurchaseLines(convertLinesToOMR(validLines), convertExtrasToOMR(pur.extraCosts));
   const canSave = validLines.length > 0;
   const hasAED = validLines.some((l) => l.currency === "AED") || pur.extraCosts.some((e) => e.currency === "AED");
+  const isUploading = Object.keys(uploadingIds).length > 0;
 
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head"><h3>تسجيل عملية شراء</h3><button className="icon-btn" onClick={onClose}><X size={18} /></button></div>
+        <div className="modal-head"><h3>تسجيل عملية شراء #{pur.number}</h3><button className="icon-btn" onClick={onClose}><X size={18} /></button></div>
         <div className="modal-body">
           <div className="form-row">
             <Field label="التاريخ"><input type="date" value={pur.date} onChange={(e) => set("date", e.target.value)} /></Field>
@@ -1458,12 +1179,157 @@ function PurchaseEditor({ purchase, materials, onSave, onClose }) {
               {hasAED && <p className="field-hint" style={{ marginTop: 6 }}>سعر التحويل المستخدم: 1000 د.إ = 105 ر.ع</p>}
             </div>
           )}
+
+          <div className="sub-head">مرفقات فاتورة الشراء (اختياري)</div>
+          <p className="field-hint" style={{ marginBottom: 8 }}>صوّر فاتورة المورد أو ارفع ملف PDF — يتحول تلقائيًا لملف PDF مضغوط ويُخزّن بمكان منفصل (Firebase Storage)، بعيد عن قاعدة البيانات الأساسية.</p>
+          <div className="trip-costs">
+            {(pur.attachments || []).length === 0 && Object.keys(uploadingIds).length === 0 && (
+              <p className="empty-sub" style={{ margin: "0 0 8px" }}>ما فيه مرفقات بعد.</p>
+            )}
+            {(pur.attachments || []).map((att) => (
+              <div className="attachment-row" key={att.id}>
+                <span className="num">📎 {att.label ? `${att.label} — ` : ""}{att.fileName}</span>
+                <a className="icon-btn" href={att.url} target="_blank" rel="noopener noreferrer">تحميل</a>
+                <button className="icon-btn danger" onClick={() => removeAttachment(att.id)}><Trash2 size={14} /></button>
+              </div>
+            ))}
+            {Object.keys(uploadingIds).map((tid) => (
+              <div className="attachment-row" key={tid}><span className="num">جاري رفع ومعالجة الملف...</span></div>
+            ))}
+            <label className="link-btn" style={{ cursor: "pointer" }}>
+              <Plus size={14} /> إضافة مرفق
+              <input
+                type="file" accept="image/*,application/pdf" style={{ display: "none" }}
+                onChange={(e) => { handleAttachFile(e.target.files); e.target.value = ""; }}
+              />
+            </label>
+          </div>
         </div>
         <div className="modal-foot">
           <button className="btn-ghost" onClick={onClose}>إلغاء</button>
-          <button className="btn-primary" disabled={!canSave} onClick={() => onSave(pur)}>حفظ الشراء</button>
+          <button className="btn-primary" disabled={!canSave || isUploading} onClick={() => onSave(pur)}>
+            {isUploading ? "بانتظار اكتمال الرفع..." : "حفظ الشراء"}
+          </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ============================== purchase log ============================== */
+
+function PurchaseLogTab({ data }) {
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [openId, setOpenId] = useState(null);
+
+  const filtered = data.purchases.filter((pur) => (!dateFrom || pur.date >= dateFrom) && (!dateTo || pur.date <= dateTo));
+  const isFiltering = dateFrom || dateTo;
+  const totalSpend = filtered.reduce(
+    (s, pur) => s + (pur.lines || []).reduce((ls, l) => ls + (Number(l.landedTotal) || 0), 0),
+    0
+  );
+
+  return (
+    <div className="page">
+      <PageHead
+        eyebrow="المشتريات"
+        title="سجل المشتريات"
+        desc="كل عمليات الشراء بالتفصيل، مع مرفقات فواتير الموردين — فلترة حسب التاريخ وتحميل أي فاتورة وقت ما تحتاجها"
+      />
+
+      {data.purchases.length === 0 ? (
+        <Empty icon={FileText} title="ما فيه مشتريات مسجلة بعد" sub="سجّل أول عملية شراء من تبويب «المخزون والمواد»." />
+      ) : (
+        <>
+          <div className="panel">
+            <div className="panel-head"><h3>فلترة حسب التاريخ</h3></div>
+            <div className="form-row">
+              <Field label="من تاريخ"><input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} /></Field>
+              <Field label="إلى تاريخ"><input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
+              {isFiltering && (
+                <div style={{ display: "flex", alignItems: "flex-end" }}>
+                  <button className="btn-ghost" onClick={() => { setDateFrom(""); setDateTo(""); }}>مسح الفلتر</button>
+                </div>
+              )}
+            </div>
+            {isFiltering && (
+              <div className="calc-summary">
+                <div><span>عدد عمليات الشراء</span><strong>{filtered.length}</strong></div>
+                <div><span>إجمالي الصرف بالفترة</span><strong>{fmt(totalSpend)} ر.ع</strong></div>
+              </div>
+            )}
+          </div>
+
+          {filtered.length === 0 ? (
+            <Empty icon={FileText} title="ما فيه مشتريات بهالفترة" sub="جرب توسّع نطاق التاريخ." />
+          ) : (
+            <div className="invoice-list">
+              {[...filtered].reverse().map((pur) => {
+                const open = openId === pur.id;
+                const lineTotal = (pur.lines || []).reduce((s, l) => s + (Number(l.landedTotal) || 0), 0);
+                const extraTotal = (pur.extraCosts || []).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+                return (
+                  <div className="ticket" key={pur.id}>
+                    <div className="ticket-main">
+                      <div className="ticket-top">
+                        <span className="ticket-no">شراء #{pur.number || "—"}</span>
+                        <span className="ticket-date">{pur.date}</span>
+                        {(pur.attachments || []).length > 0 && <span className="badge green">📎 {pur.attachments.length}</span>}
+                      </div>
+                      {pur.note && <div className="ticket-customer">{pur.note}</div>}
+                      <div className="ticket-items">
+                        {(pur.lines || []).map((l) => {
+                          const mat = data.materials.find((m) => m.id === l.materialId);
+                          return <span key={l.id} className="chip">{mat?.name || "—"} × {l.qty}</span>;
+                        })}
+                      </div>
+                    </div>
+                    <div className="ticket-side">
+                      <div className="ticket-total">{fmt(lineTotal + extraTotal)} ر.ع</div>
+                      <div className="ticket-actions">
+                        <button className="link-btn" onClick={() => setOpenId(open ? null : pur.id)}>
+                          <ChevronLeft size={13} className={`chev ${open ? "open" : ""}`} /> {open ? "إخفاء" : "التفاصيل"}
+                        </button>
+                      </div>
+                    </div>
+                    {open && (
+                      <div className="product-detail" style={{ width: "100%" }}>
+                        <div className="detail-list">
+                          {(pur.lines || []).map((l) => {
+                            const mat = data.materials.find((m) => m.id === l.materialId);
+                            const supplierBits = [l.supplierName, l.supplierInvoiceNo && `فاتورة #${l.supplierInvoiceNo}`, l.lineNote].filter(Boolean).join(" · ");
+                            return (
+                              <div className="detail-row" key={l.id}>
+                                <span>{mat?.name} ({l.qty} {mat?.unit}){supplierBits ? ` — ${supplierBits}` : ""}</span>
+                                <span className="num">{fmt(l.landedUnitCost)} ر.ع / وحدة</span>
+                              </div>
+                            );
+                          })}
+                          {extraTotal > 0 && (
+                            <div className="detail-row"><span>تكاليف إضافية (نقل، بترول...)</span><span className="num">{fmt(extraTotal)} ر.ع</span></div>
+                          )}
+                        </div>
+                        {(pur.attachments || []).length > 0 && (
+                          <div className="mini-list" style={{ marginTop: 10 }}>
+                            <div className="mini-list-title">مرفقات فاتورة الشراء</div>
+                            {pur.attachments.map((att) => (
+                              <div className="mini-list-row" key={att.id}>
+                                <span>📎 {att.label ? `${att.label} — ` : ""}{att.fileName}</span>
+                                <a href={att.url} target="_blank" rel="noopener noreferrer" className="link-btn">تحميل</a>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -2153,7 +2019,7 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
           {data.materials.length > 0 && (
             <>
               <div className="sub-head">استهلاك مواد إضافية (داخلي فقط، ما يظهر بالفاتورة المطبوعة)</div>
-              <p className="field-hint" style={{ marginBottom: 8 }}>مثلاً كيس واحد يغلّف 3 عطور — سجّله هنا مرة وحدة بس عشان يخصم من مخزون الأكياس، بعيد عن أصناف الفاتورة اللي يشوفها العميل.</p>
+              <p className="field-hint" style={{ marginBottom: 8 }}>مثلاً كيس واحد يغلّف عطرين — سجّله هنا مرة وحدة بس عشان يخصم من مخزون الأكياس، بعيد عن أصناف الفاتورة اللي يشوفها العميل.</p>
               <div className="trip-costs">
                 {(inv.overheadUsage || []).length === 0 && <p className="empty-sub" style={{ margin: 0 }}>ما فيه استهلاك مسجّل — اضغط + لو تبي تسجل.</p>}
                 {(inv.overheadUsage || []).map((u) => {
@@ -2958,6 +2824,8 @@ function Style() {
       .purchase-line-extra{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-top:8px; }
       .purchase-extra-row{ display:grid; grid-template-columns:1fr 110px 80px 34px; gap:8px; align-items:center; margin-bottom:6px; }
       .overhead-usage-row{ display:grid; grid-template-columns:1fr 130px 34px; gap:8px; align-items:center; margin-bottom:6px; }
+      .attachment-row{ display:flex; align-items:center; gap:8px; margin-bottom:6px; flex-wrap:wrap; }
+      .attachment-row .num{ flex:1; font-size:12px; }
       .invoice-item-block{ border:1px solid var(--border); border-radius:10px; padding:8px; margin-bottom:4px; }
       .invoice-item-row{ display:grid; grid-template-columns:1.6fr .7fr .9fr .9fr 34px; gap:8px; align-items:center; }
       .invoice-item-extra{ display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap; }
