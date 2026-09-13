@@ -7,7 +7,6 @@ import {
   sendPasswordResetEmail,
   onAuthStateChanged,
 } from "firebase/auth";
-import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 
 const firebaseConfig = {
   apiKey: "AIzaSyCSQ5xxXI5xl2HJ8C2GSRqB0OhHBKR0plo",
@@ -21,22 +20,6 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app);
 export const auth = getAuth(app);
-export const storage = getStorage(app);
-
-export async function uploadPurchaseInvoiceFile(fileName, blob) {
-  const fileRef = ref(storage, `purchase-invoices/${fileName}`);
-  await uploadBytes(fileRef, blob, { contentType: blob.type || "application/pdf" });
-  const url = await getDownloadURL(fileRef);
-  return url;
-}
-
-export async function deletePurchaseInvoiceFile(fileName) {
-  try {
-    await deleteObject(ref(storage, `purchase-invoices/${fileName}`));
-  } catch (e) {
-    console.error("delete attachment error", e);
-  }
-}
 
 export function watchAuth(callback) {
   return onAuthStateChanged(auth, callback);
