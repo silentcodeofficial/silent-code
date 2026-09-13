@@ -9,7 +9,8 @@ import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   PieChart, Pie, Cell, Legend
 } from "recharts";
-import { loadAppData, saveAppData, defaultAppData, watchAuth, signIn, signOutUser, resetPassword, ensureDailyBackup, listBackupDates, loadBackup, uploadPurchaseInvoiceFile, deletePurchaseInvoiceFile } from "./firebase";
+import { loadAppData, saveAppData, defaultAppData, watchAuth, signIn, signOutUser, resetPassword, ensureDailyBackup, listBackupDates, loadBackup } from "./firebase";
+import { uploadToGoogleDrive, deleteFromGoogleDrive } from "./googleDrive";
 
 /* ============================== helpers ============================== */
 
@@ -26,7 +27,7 @@ const UNITS = ["مل", "جرام", "قطعة"];
 const AED_RATE = 0.105; // 1000 AED = 105 OMR
 
 /* ---- purchase invoice attachments: compress images and wrap them into a
-   single-page PDF client-side before uploading, so Firebase Storage only
+   single-page PDF client-side before uploading, so Google Drive only
    ever receives small, consistent PDF files regardless of the original
    photo's size. Existing PDFs are uploaded as-is. ---- */
 
@@ -1086,18 +1087,18 @@ function PurchaseEditor({ purchase, materials, onSave, onClose }) {
       const label = window.prompt("وصف مختصر للمرفق (اختياري، مثلاً: فاتورة شركة الورد)", "") || "";
       const blob = await prepareInvoiceFileForUpload(file);
       const fileName = buildPurchaseFileName(pur, materials, label);
-      const url = await uploadPurchaseInvoiceFile(fileName, blob);
-      setPur((p) => ({ ...p, attachments: [...(p.attachments || []), { id: tempId, label, fileName, url } ] }));
+      const { fileId, url } = await uploadToGoogleDrive(fileName, blob);
+      setPur((p) => ({ ...p, attachments: [...(p.attachments || []), { id: tempId, label, fileName, url, fileId }] }));
     } catch (e) {
       console.error("attachment upload error", e);
-      alert("صار خطأ أثناء رفع المرفق، حاول مرة ثانية.");
+      alert("صار خطأ أثناء رفع المرفق لـ Google Drive، حاول مرة ثانية.");
     }
     setUploadingIds((u) => { const n = { ...u }; delete n[tempId]; return n; });
   }
   function removeAttachment(id) {
     const att = (pur.attachments || []).find((a) => a.id === id);
     setPur({ ...pur, attachments: (pur.attachments || []).filter((a) => a.id !== id) });
-    if (att?.fileName) deletePurchaseInvoiceFile(att.fileName);
+    if (att?.fileId) deleteFromGoogleDrive(att.fileId);
   }
 
   const validLines = pur.lines.filter((l) => l.materialId && l.qty);
@@ -1181,7 +1182,7 @@ function PurchaseEditor({ purchase, materials, onSave, onClose }) {
           )}
 
           <div className="sub-head">مرفقات فاتورة الشراء (اختياري)</div>
-          <p className="field-hint" style={{ marginBottom: 8 }}>صوّر فاتورة المورد أو ارفع ملف PDF — يتحول تلقائيًا لملف PDF مضغوط ويُخزّن بمكان منفصل (Firebase Storage)، بعيد عن قاعدة البيانات الأساسية.</p>
+          <p className="field-hint" style={{ marginBottom: 8 }}>صوّر فاتورة المورد أو ارفع ملف PDF — يتحول تلقائيًا لملف PDF مضغوط ويُرفع لحساب Google Drive الخاص بك (بعيد عن قاعدة البيانات الأساسية). أول مرة، بيطلب منك تسجيل دخول والموافقة.</p>
           <div className="trip-costs">
             {(pur.attachments || []).length === 0 && Object.keys(uploadingIds).length === 0 && (
               <p className="empty-sub" style={{ margin: "0 0 8px" }}>ما فيه مرفقات بعد.</p>
