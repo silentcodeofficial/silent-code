@@ -7,6 +7,7 @@ import {
   sendPasswordResetEmail,
   onAuthStateChanged,
 } from "firebase/auth";
+import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 
 const firebaseConfig = {
   apiKey: "AIzaSyCSQ5xxXI5xl2HJ8C2GSRqB0OhHBKR0plo",
@@ -20,6 +21,22 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app);
 export const auth = getAuth(app);
+export const storage = getStorage(app);
+
+export async function uploadPurchaseInvoiceFile(fileName, blob) {
+  const fileRef = ref(storage, `purchase-invoices/${fileName}`);
+  await uploadBytes(fileRef, blob, { contentType: blob.type || "application/pdf" });
+  const url = await getDownloadURL(fileRef);
+  return url;
+}
+
+export async function deletePurchaseInvoiceFile(fileName) {
+  try {
+    await deleteObject(ref(storage, `purchase-invoices/${fileName}`));
+  } catch (e) {
+    console.error("delete attachment error", e);
+  }
+}
 
 export function watchAuth(callback) {
   return onAuthStateChanged(auth, callback);
@@ -50,7 +67,6 @@ const LIST_KEYS = [
   "losses",
   "branding",
   "equipment",
-  "notifications",
 ];
 
 export function defaultAppData() {
@@ -64,7 +80,6 @@ export function defaultAppData() {
     losses: [],
     branding: [],
     equipment: [],
-    notifications: [],
     settings: {
       paymentMethods: [
         "نقدًا (كاش)",
@@ -79,16 +94,9 @@ export function defaultAppData() {
       ],
       devPercent: 50,
       businessInfo: { phone: "", address: "", instagram: "", note: "" },
-      // running bank-balance baseline: once set, the dashboard adds every
-      // invoice dated after `setAt` and subtracts every expense dated after
-      // `setAt`, so the displayed balance always stays live without anyone
-      // having to touch this number by hand.
-      bankBalance: { amount: null, setAt: "", setBy: "" },
-      // a change request waiting on the *other* partner's approval; null
-      // when there is nothing pending.
-      pendingBalanceRequest: null,
     },
     nextInvoiceNo: 1001,
+    nextPurchaseNo: 1001,
   };
 }
 
@@ -105,6 +113,7 @@ export async function loadAppData() {
     const meta = metaSnap.data();
     if (meta.settings) result.settings = meta.settings;
     if (meta.nextInvoiceNo) result.nextInvoiceNo = meta.nextInvoiceNo;
+    if (meta.nextPurchaseNo) result.nextPurchaseNo = meta.nextPurchaseNo;
   }
   return result;
 }
@@ -117,8 +126,8 @@ export async function saveAppData(prev, next) {
       writes.push(setDoc(doc(db, "app", key), { list: next[key] }));
     }
   }
-  const prevMeta = prev ? { settings: prev.settings, nextInvoiceNo: prev.nextInvoiceNo } : undefined;
-  const nextMeta = { settings: next.settings, nextInvoiceNo: next.nextInvoiceNo };
+  const prevMeta = prev ? { settings: prev.settings, nextInvoiceNo: prev.nextInvoiceNo, nextPurchaseNo: prev.nextPurchaseNo } : undefined;
+  const nextMeta = { settings: next.settings, nextInvoiceNo: next.nextInvoiceNo, nextPurchaseNo: next.nextPurchaseNo };
   if (JSON.stringify(prevMeta) !== JSON.stringify(nextMeta)) {
     writes.push(setDoc(doc(db, "app", "meta"), nextMeta));
   }
@@ -150,6 +159,7 @@ export async function ensureDailyBackup(data) {
         createdAt: today,
         settings: data.settings,
         nextInvoiceNo: data.nextInvoiceNo,
+        nextPurchaseNo: data.nextPurchaseNo,
       })
     );
     await Promise.all(writes);
@@ -180,6 +190,7 @@ export async function loadBackup(dateStr) {
     const meta = metaSnap.data();
     if (meta.settings) result.settings = meta.settings;
     if (meta.nextInvoiceNo) result.nextInvoiceNo = meta.nextInvoiceNo;
+    if (meta.nextPurchaseNo) result.nextPurchaseNo = meta.nextPurchaseNo;
   }
   return result;
 }
