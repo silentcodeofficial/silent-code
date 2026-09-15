@@ -898,8 +898,12 @@ function MaterialsTab({ data, persist, currentUser }) {
   }
   function removePurchase(id) {
     setConfirmState({
-      message: "تأكيد حذف سجل الشراء؟ (لن يرجع تلقائيًا الكمية أو يصحح متوسط التكلفة بالمواد)",
-      onConfirm: () => persist({ ...data, purchases: data.purchases.filter((p) => p.id !== id) }),
+      message: "تأكيد حذف سجل الشراء؟ (لن يرجع تلقائيًا الكمية أو يصحح متوسط التكلفة بالمواد، وراح يحذف أي مرفقات فاتورة من Google Drive)",
+      onConfirm: () => {
+        const pur = data.purchases.find((p) => p.id === id);
+        (pur?.attachments || []).forEach((att) => { if (att.fileId) deleteFromGoogleDrive(att.fileId); });
+        persist({ ...data, purchases: data.purchases.filter((p) => p.id !== id) });
+      },
     });
   }
   function savePurchase(pur) {
