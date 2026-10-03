@@ -90,6 +90,33 @@ function allocatePurchaseLines(lines, extraCosts) {
   });
 }
 
+function reversePurchaseEffect(materials, pur) {
+  // يرجع تأثير عملية شراء سابقة (الكمية + متوسط التكلفة) عن المواد، تمهيدًا لتطبيق نسخة معدّلة منها.
+  // ملاحظة مهمة: هذا الرجوع صحيح رياضيًا فقط إذا ما تغيّر مخزون/متوسط تكلفة هذي المادة بعد هذا الشراء
+  // (يعني ما فيه شراء أو استهلاك إنتاج لاحق لنفس المادة). لو فيه عمليات لاحقة، النتيجة تقريبية.
+  let mats = materials;
+  (pur?.lines || []).forEach((l) => {
+    if (!l.materialId) return;
+    const qty = Number(l.qty) || 0;
+    if (qty <= 0) return;
+    const landed = Number(l.landedUnitCost) || 0;
+    mats = mats.map((m) => {
+      if (m.id !== l.materialId) return m;
+      const curStock = Number(m.stock) || 0;
+      const curAvg = Number(m.avgCost) || 0;
+      const priorStock = curStock - qty;
+      if (priorStock <= 0) {
+        // المخزون الحالي أقل من كمية الشراء القديم (صار استهلاك بعده) — نرجّع الكمية فقط ونحافظ على نفس المتوسط
+        return { ...m, stock: Math.max(priorStock, 0) };
+      }
+      const priorTotalValue = curStock * curAvg - qty * landed;
+      const priorAvg = priorTotalValue > 0 ? priorTotalValue / priorStock : curAvg;
+      return { ...m, stock: priorStock, avgCost: priorAvg };
+    });
+  });
+  return mats;
+}
+
 function convertLinesToOMR(lines) {
   return lines.map((l) => ({ ...l, unitCostOriginal: l.unitCost, currency: l.currency || "OMR", unitCost: toOMR(l.unitCost, l.currency) }));
 }
@@ -906,11 +933,25 @@ function MaterialsTab({ data, persist, currentUser }) {
       },
     });
   }
+  function editPurchase(pur) {
+    // نرجّع للمستخدم السعر بعملته الأصلية (مو بعد تحويلها لريال عماني) عشان التعديل يفتح بنفس القيم اللي أدخلها أول مرة
+    setPurchase({
+      ...pur,
+      lines: pur.lines.map((l) => ({ ...l, unitCost: l.unitCostOriginal !== undefined ? l.unitCostOriginal : l.unitCost })),
+      extraCosts: (pur.extraCosts || []).map((e) => ({ ...e, amount: e.amountOriginal !== undefined ? e.amountOriginal : e.amount })),
+    });
+  }
   function savePurchase(pur) {
+    const isEdit = data.purchases.some((p) => p.id === pur.id);
     const validLines = convertLinesToOMR(pur.lines.filter((l) => l.materialId && l.qty));
     const extraCosts = convertExtrasToOMR(pur.extraCosts);
     const allocated = allocatePurchaseLines(validLines, extraCosts);
+
     let materials = [...data.materials];
+    if (isEdit) {
+      const oldPur = data.purchases.find((p) => p.id === pur.id);
+      materials = reversePurchaseEffect(materials, oldPur);
+    }
     allocated.forEach((l) => {
       materials = materials.map((m) => {
         if (m.id !== l.materialId) return m;
@@ -922,7 +963,13 @@ function MaterialsTab({ data, persist, currentUser }) {
         return { ...m, stock: newStock, avgCost: newAvg };
       });
     });
-    const purchases = [...data.purchases, { ...pur, lines: allocated, extraCosts, createdBy: currentUser?.name }];
+
+    const purchases = isEdit
+      ? data.purchases.map((p) => (p.id === pur.id
+          ? { ...pur, lines: allocated, extraCosts, createdBy: p.createdBy, editedBy: currentUser?.name, editedAt: new Date().toISOString() }
+          : p))
+      : [...data.purchases, { ...pur, lines: allocated, extraCosts, createdBy: currentUser?.name }];
+
     const nextPurchaseNo = Math.max(Number(data.nextPurchaseNo) || 1001, (Number(pur.number) || 0) + 1);
     persist({ ...data, materials, purchases, nextPurchaseNo });
     setPurchase(null);
@@ -1013,8 +1060,13 @@ function MaterialsTab({ data, persist, currentUser }) {
                         })}
                       </td>
                       <td className="num">{fmt(pur.extraCosts.reduce((s, e) => s + (Number(e.amount) || 0), 0))} ر.ع</td>
-                      <td>{pur.createdBy && <span className="badge blue">{pur.createdBy}</span>}</td>
-                      <td><button className="icon-btn danger" onClick={() => removePurchase(pur.id)}><Trash2 size={13} /></button></td>
+                      <td>{pur.createdBy && <span className="badge blue">{pur.createdBy}</span>}{pur.editedBy && <span className="badge" style={{ marginRight: 4 }}>عُدّل: {pur.editedBy}</span>}</td>
+                      <td>
+                        <div style={{ display: "flex", gap: 6 }}>
+                          <button className="icon-btn" onClick={() => editPurchase(pur)}><Pencil size={13} /></button>
+                          <button className="icon-btn danger" onClick={() => removePurchase(pur.id)}><Trash2 size={13} /></button>
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -1025,7 +1077,15 @@ function MaterialsTab({ data, persist, currentUser }) {
       </div>
 
       {editingMat && <MaterialEditor material={editingMat} onSave={saveMaterial} onClose={() => setEditingMat(null)} />}
-      {purchase && <PurchaseEditor purchase={purchase} materials={data.materials} onSave={savePurchase} onClose={() => setPurchase(null)} />}
+      {purchase && (
+        <PurchaseEditor
+          purchase={purchase}
+          materials={data.materials}
+          onSave={savePurchase}
+          onClose={() => setPurchase(null)}
+          isEdit={data.purchases.some((p) => p.id === purchase.id)}
+        />
+      )}
       <ConfirmModal state={confirmState} onCancel={() => setConfirmState(null)} />
     </div>
   );
@@ -1071,7 +1131,7 @@ function MaterialEditor({ material, onSave, onClose }) {
   );
 }
 
-function PurchaseEditor({ purchase, materials, onSave, onClose }) {
+function PurchaseEditor({ purchase, materials, onSave, onClose, isEdit }) {
   const [pur, setPur] = useState(purchase);
   const [uploadingIds, setUploadingIds] = useState({});
   function set(f, v) { setPur({ ...pur, [f]: v }); }
@@ -1114,8 +1174,13 @@ function PurchaseEditor({ purchase, materials, onSave, onClose }) {
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head"><h3>تسجيل عملية شراء #{pur.number}</h3><button className="icon-btn" onClick={onClose}><X size={18} /></button></div>
+        <div className="modal-head"><h3>{isEdit ? "تعديل" : "تسجيل"} عملية شراء #{pur.number}</h3><button className="icon-btn" onClick={onClose}><X size={18} /></button></div>
         <div className="modal-body">
+          {isEdit && (
+            <p className="field-hint" style={{ marginBottom: 10, background: "var(--panel-soft, #fff7e0)", padding: 8, borderRadius: 8 }}>
+              ⚠️ أي تعديل هنا بيحدّث تلقائيًا كمية ومتوسط تكلفة المواد المتأثرة. لو تم استخدام هذي المواد بعد هذا الشراء (دفعة إنتاج مثلاً)، تحديث متوسط التكلفة يكون تقريبي، فحاول تعدّل مشتريات قديمة بأقرب وقت لما تلاحظ الخطأ.
+            </p>
+          )}
           <div className="form-row">
             <Field label="التاريخ"><input type="date" value={pur.date} onChange={(e) => set("date", e.target.value)} /></Field>
             <Field label="ملاحظة (مثال: رحلة مسقط لجلب المواد)"><input value={pur.note} onChange={(e) => set("note", e.target.value)} /></Field>
@@ -1213,7 +1278,7 @@ function PurchaseEditor({ purchase, materials, onSave, onClose }) {
         <div className="modal-foot">
           <button className="btn-ghost" onClick={onClose}>إلغاء</button>
           <button className="btn-primary" disabled={!canSave || isUploading} onClick={() => onSave(pur)}>
-            {isUploading ? "بانتظار اكتمال الرفع..." : "حفظ الشراء"}
+            {isUploading ? "بانتظار اكتمال الرفع..." : isEdit ? "حفظ التعديلات" : "حفظ الشراء"}
           </button>
         </div>
       </div>
