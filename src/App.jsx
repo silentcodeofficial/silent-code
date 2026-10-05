@@ -90,31 +90,99 @@ function allocatePurchaseLines(lines, extraCosts) {
   });
 }
 
-function reversePurchaseEffect(materials, pur) {
-  // يرجع تأثير عملية شراء سابقة (الكمية + متوسط التكلفة) عن المواد، تمهيدًا لتطبيق نسخة معدّلة منها.
-  // ملاحظة مهمة: هذا الرجوع صحيح رياضيًا فقط إذا ما تغيّر مخزون/متوسط تكلفة هذي المادة بعد هذا الشراء
-  // (يعني ما فيه شراء أو استهلاك إنتاج لاحق لنفس المادة). لو فيه عمليات لاحقة، النتيجة تقريبية.
-  let mats = materials;
-  (pur?.lines || []).forEach((l) => {
-    if (!l.materialId) return;
-    const qty = Number(l.qty) || 0;
-    if (qty <= 0) return;
-    const landed = Number(l.landedUnitCost) || 0;
-    mats = mats.map((m) => {
-      if (m.id !== l.materialId) return m;
-      const curStock = Number(m.stock) || 0;
-      const curAvg = Number(m.avgCost) || 0;
-      const priorStock = curStock - qty;
-      if (priorStock <= 0) {
-        // المخزون الحالي أقل من كمية الشراء القديم (صار استهلاك بعده) — نرجّع الكمية فقط ونحافظ على نفس المتوسط
-        return { ...m, stock: Math.max(priorStock, 0) };
-      }
-      const priorTotalValue = curStock * curAvg - qty * landed;
-      const priorAvg = priorTotalValue > 0 ? priorTotalValue / priorStock : curAvg;
-      return { ...m, stock: priorStock, avgCost: priorAvg };
+/* ---- material ledger: دقة تعديل/حذف المشتريات ----
+   المخزون ومتوسط التكلفة لكل مادة = نتيجة تسلسل أحداث بالترتيب الزمني (شراء يزيد، استهلاك ينقص).
+   عند تعديل شراء: نرجع للحالة الأساسية قبل كل الأحداث (من الحالة الحالية)، ونعيد تشغيل الأحداث كلها بنسخة الشراء الجديدة. */
+const LEDGER_EPS = 1e-9;
+function ledgerRound(n) { return Number((Number(n) || 0).toFixed(6)); }
+
+function applyBuy(stock, avg, qty, unit) {
+  const w = Math.max(stock, 0);
+  const total = w + qty;
+  return { stock: stock + qty, avg: total > 0 ? (w * avg + qty * unit) / total : avg };
+}
+
+function materialEvents(data, materialId) {
+  const ev = [];
+  let n = 0;
+  (data.purchases || []).forEach((p) => {
+    (p.lines || []).forEach((l) => {
+      const qty = Number(l.qty) || 0;
+      if (l.materialId === materialId && qty > 0) ev.push({ kind: "buy", date: p.date || "", ord: 0, n: n++, qty, unit: Number(l.landedUnitCost) || 0 });
     });
   });
-  return mats;
+  (data.batches || []).forEach((b) => {
+    (b.lines || []).forEach((l) => {
+      const qty = Number(l.qty) || 0;
+      if (l.materialId === materialId && qty > 0) ev.push({ kind: "use", date: b.date || "", ord: 1, n: n++, qty });
+    });
+  });
+  (data.invoices || []).forEach((inv) => {
+    (inv.overheadUsage || []).forEach((u) => {
+      const qty = Number(u.qty) || 0;
+      if (u.materialId === materialId && qty > 0) ev.push({ kind: "use", date: inv.date || "", ord: 1, n: n++, qty });
+    });
+  });
+  return ev.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.ord - b.ord || a.n - b.n));
+}
+
+function deriveBaseState(events, curStock, curAvg) {
+  let stock = curStock, avg = curAvg;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.kind === "use") { stock += e.qty; continue; }
+    const before = stock - e.qty;
+    const w = Math.max(before, 0);
+    let prevAvg = avg;
+    if (w > 0) {
+      const a = ((w + e.qty) * avg - e.qty * e.unit) / w;
+      if (Number.isFinite(a) && a >= 0) prevAvg = a;
+    }
+    stock = before;
+    avg = prevAvg;
+  }
+  return { stock, avg };
+}
+
+function replayEvents(events, baseStock, baseAvg) {
+  let stock = baseStock, avg = baseAvg, min = baseStock;
+  events.forEach((e) => {
+    if (e.kind === "use") stock -= e.qty;
+    else { const r = applyBuy(stock, avg, e.qty, e.unit); stock = r.stock; avg = r.avg; }
+    if (stock < min) min = stock;
+  });
+  return { stock, avg, min };
+}
+
+// newPur = null يعني حذف الشراء. يرجع { materials } أو { error }
+function recomputeMaterialsForPurchaseChange(data, oldPur, newPur) {
+  const affected = new Set();
+  [oldPur, newPur].forEach((p) => (p?.lines || []).forEach((l) => l.materialId && affected.add(l.materialId)));
+  const dataAfter = {
+    ...data,
+    purchases: newPur ? data.purchases.map((p) => (p.id === newPur.id ? newPur : p)) : data.purchases.filter((p) => p.id !== oldPur.id),
+  };
+  const problems = [];
+  const materials = data.materials.map((m) => {
+    if (!affected.has(m.id)) return m;
+    const curStock = Number(m.stock) || 0;
+    const curAvg = Number(m.avgCost) || 0;
+    const evOld = materialEvents(data, m.id);
+    const base = deriveBaseState(evOld, curStock, curAvg);
+    const oldRes = replayEvents(evOld, base.stock, base.avg);
+    const newRes = replayEvents(materialEvents(dataAfter, m.id), base.stock, base.avg);
+    const dipsNew = newRes.min < -LEDGER_EPS && newRes.min < oldRes.min - LEDGER_EPS;
+    const finalNeg = newRes.stock < -LEDGER_EPS && newRes.stock < curStock - LEDGER_EPS;
+    if (dipsNew || finalNeg) {
+      const shortage = Math.abs(Math.min(newRes.min, newRes.stock));
+      problems.push(`«${m.name}» بتصير بالسالب (ناقص ${ledgerRound(shortage)} ${m.unit || ""})`);
+    }
+    return { ...m, stock: ledgerRound(newRes.stock), avgCost: ledgerRound(newRes.avg) };
+  });
+  if (problems.length) {
+    return { error: "ما قدرت أحفظ — لأن جزء من هذي المواد انستهلك بدفعات إنتاج أو فواتير بعد هذا الشراء، والتعديل بيخلي المخزون ناقص: " + problems.join("، ") + ". عدّل الكمية أو التاريخ بحيث تغطي اللي انستهلك." };
+  }
+  return { materials };
 }
 
 function convertLinesToOMR(lines) {
@@ -526,6 +594,13 @@ function PageHead({ eyebrow, title, desc, action }) {
   );
 }
 
+/* ---- تسجيل خروج تلقائي عند الخمول ---- */
+const IDLE_LIMIT_MIN = 30; // دقائق بدون أي حركة قبل تسجيل الخروج التلقائي
+const ACTIVITY_KEY = "silentcode_last_activity";
+function touchActivity() { try { localStorage.setItem(ACTIVITY_KEY, String(Date.now())); } catch (e) {} }
+function readActivity() { try { return Number(localStorage.getItem(ACTIVITY_KEY)) || 0; } catch (e) { return 0; } }
+function clearActivity() { try { localStorage.removeItem(ACTIVITY_KEY); } catch (e) {} }
+
 function LoginScreen({ onSignedIn }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -539,6 +614,7 @@ function LoginScreen({ onSignedIn }) {
     setError("");
     setResetMsg("");
     try {
+      touchActivity(); // نسجل وقت الدخول قبل ما يشتغل فحص الخمول
       const user = await signIn(email, password);
       onSignedIn(user);
     } catch (e) {
@@ -556,7 +632,7 @@ function LoginScreen({ onSignedIn }) {
     setError("");
     try {
       await resetPassword(email);
-      setResetMsg("أرسلنا رابط تعيين كلمة مرور جديدة لإيميلك، تأكد من صندوق الوارد.");
+      setResetMsg("أرسلنا رابط تعيين كلمة مرور جديدة لإيميلك. شيّك صندوق الوارد، وإذا ما لقيته شوف مجلد الرسائل غير المرغوبة (Spam).");
     } catch (e) {
       setError("ما قدرنا نرسل رابط الاستعادة. تأكد إن الإيميل صحيح.");
     }
@@ -588,7 +664,7 @@ function LoginScreen({ onSignedIn }) {
             {busy ? "..." : "دخول"}
           </button>
           <button type="button" className="link-btn" style={{ justifyContent: "center", marginTop: 4 }} onClick={forgotPassword} disabled={busy}>
-            نسيت كلمة المرور؟
+            نسيت كلمة المرور؟ اضغط هنا لإرسال رابط استعادة
           </button>
         </div>
 
@@ -641,9 +717,45 @@ export default function CostingApp() {
   }
 
   async function handleLogout() {
+    clearActivity();
     await signOutUser();
     setData(null);
   }
+
+  async function handleChangePassword() {
+    if (!authUser?.email) return;
+    if (!window.confirm("نرسل رابط تغيير كلمة المرور لإيميلك (" + authUser.email + ")؟")) return;
+    try {
+      await resetPassword(authUser.email);
+      alert("تم إرسال الرابط لإيميلك. شيّك الوارد أو مجلد Spam.");
+    } catch (e) {
+      alert("ما قدرنا نرسل الرابط، حاول مرة ثانية.");
+    }
+  }
+
+  // خروج تلقائي لو ما فيه نشاط (يشمل لو فتح البرنامج بعد غياب طويل)
+  useEffect(() => {
+    if (!authUser) return;
+    const limit = IDLE_LIMIT_MIN * 60 * 1000;
+    const stale = () => { const last = readActivity(); return last > 0 && Date.now() - last > limit; };
+    if (stale()) { handleLogout(); return; }
+    touchActivity();
+    let lastWrite = Date.now();
+    const onActivity = () => {
+      const now = Date.now();
+      if (now - lastWrite > 15000) { lastWrite = now; touchActivity(); }
+    };
+    const check = () => { if (stale()) handleLogout(); };
+    const evs = ["mousemove", "mousedown", "keydown", "touchstart", "scroll", "click"];
+    evs.forEach((e) => window.addEventListener(e, onActivity, { passive: true }));
+    document.addEventListener("visibilitychange", check);
+    const timer = setInterval(check, 30000);
+    return () => {
+      evs.forEach((e) => window.removeEventListener(e, onActivity));
+      document.removeEventListener("visibilitychange", check);
+      clearInterval(timer);
+    };
+  }, [authUser]);
 
   if (authUser === undefined) {
     return (
@@ -712,6 +824,7 @@ export default function CostingApp() {
         </nav>
         <div className="sidebar-user">
           <div className="sidebar-user-name">{currentUser.name}</div>
+          <button className="logout-btn" onClick={handleChangePassword} style={{ marginBottom: 6 }}>تغيير كلمة المرور</button>
           <button className="logout-btn" onClick={handleLogout}>تسجيل خروج</button>
         </div>
         <div className="sidebar-foot">
@@ -924,12 +1037,15 @@ function MaterialsTab({ data, persist, currentUser }) {
     });
   }
   function removePurchase(id) {
+    const pur = data.purchases.find((p) => p.id === id);
+    if (!pur) return;
+    const res = recomputeMaterialsForPurchaseChange(data, pur, null);
+    if (res.error) { alert(res.error); return; }
     setConfirmState({
-      message: "تأكيد حذف سجل الشراء؟ (لن يرجع تلقائيًا الكمية أو يصحح متوسط التكلفة بالمواد، وراح يحذف أي مرفقات فاتورة من Google Drive)",
+      message: "تأكيد حذف سجل الشراء؟ بيرجع المخزون ومتوسط التكلفة للمواد المتأثرة تلقائيًا، وراح يحذف أي مرفقات فاتورة من Google Drive.",
       onConfirm: () => {
-        const pur = data.purchases.find((p) => p.id === id);
-        (pur?.attachments || []).forEach((att) => { if (att.fileId) deleteFromGoogleDrive(att.fileId); });
-        persist({ ...data, purchases: data.purchases.filter((p) => p.id !== id) });
+        (pur.attachments || []).forEach((att) => { if (att.fileId) deleteFromGoogleDrive(att.fileId); });
+        persist({ ...data, materials: res.materials, purchases: data.purchases.filter((p) => p.id !== id) });
       },
     });
   }
@@ -941,38 +1057,41 @@ function MaterialsTab({ data, persist, currentUser }) {
       extraCosts: (pur.extraCosts || []).map((e) => ({ ...e, amount: e.amountOriginal !== undefined ? e.amountOriginal : e.amount })),
     });
   }
-  function savePurchase(pur) {
-    const isEdit = data.purchases.some((p) => p.id === pur.id);
+  function savePurchase(pur, pendingDeletes) {
+    const oldPur = data.purchases.find((p) => p.id === pur.id);
+    const isEdit = !!oldPur;
     const validLines = convertLinesToOMR(pur.lines.filter((l) => l.materialId && l.qty));
     const extraCosts = convertExtrasToOMR(pur.extraCosts);
     const allocated = allocatePurchaseLines(validLines, extraCosts);
 
-    let materials = [...data.materials];
+    let materials;
+    let purchases;
     if (isEdit) {
-      const oldPur = data.purchases.find((p) => p.id === pur.id);
-      materials = reversePurchaseEffect(materials, oldPur);
-    }
-    allocated.forEach((l) => {
-      materials = materials.map((m) => {
-        if (m.id !== l.materialId) return m;
-        const curStock = Number(m.stock) || 0;
-        const curAvg = Number(m.avgCost) || 0;
-        const qty = Number(l.qty) || 0;
-        const newStock = curStock + qty;
-        const newAvg = newStock > 0 ? (curStock * curAvg + qty * l.landedUnitCost) / newStock : curAvg;
-        return { ...m, stock: newStock, avgCost: newAvg };
+      // تعديل: نفس رقم السجل ونفس المكان — ما يتحول لشراء جديد، والمخزون يتصحح بإعادة حساب كامل
+      const updated = { ...pur, lines: allocated, extraCosts, createdBy: oldPur.createdBy, editedBy: currentUser?.name, editedAt: new Date().toISOString() };
+      const res = recomputeMaterialsForPurchaseChange(data, oldPur, updated);
+      if (res.error) { alert(res.error); return false; }
+      materials = res.materials;
+      purchases = data.purchases.map((p) => (p.id === pur.id ? updated : p));
+    } else {
+      materials = data.materials.map((m) => {
+        let cur = { stock: Number(m.stock) || 0, avg: Number(m.avgCost) || 0 };
+        let touched = false;
+        allocated.forEach((l) => {
+          if (l.materialId !== m.id) return;
+          cur = applyBuy(cur.stock, cur.avg, Number(l.qty) || 0, l.landedUnitCost);
+          touched = true;
+        });
+        return touched ? { ...m, stock: ledgerRound(cur.stock), avgCost: ledgerRound(cur.avg) } : m;
       });
-    });
-
-    const purchases = isEdit
-      ? data.purchases.map((p) => (p.id === pur.id
-          ? { ...pur, lines: allocated, extraCosts, createdBy: p.createdBy, editedBy: currentUser?.name, editedAt: new Date().toISOString() }
-          : p))
-      : [...data.purchases, { ...pur, lines: allocated, extraCosts, createdBy: currentUser?.name }];
+      purchases = [...data.purchases, { ...pur, lines: allocated, extraCosts, createdBy: currentUser?.name }];
+    }
 
     const nextPurchaseNo = Math.max(Number(data.nextPurchaseNo) || 1001, (Number(pur.number) || 0) + 1);
     persist({ ...data, materials, purchases, nextPurchaseNo });
+    (pendingDeletes || []).forEach((fileId) => deleteFromGoogleDrive(fileId));
     setPurchase(null);
+    return true;
   }
 
   return (
@@ -1134,6 +1253,13 @@ function MaterialEditor({ material, onSave, onClose }) {
 function PurchaseEditor({ purchase, materials, onSave, onClose, isEdit }) {
   const [pur, setPur] = useState(purchase);
   const [uploadingIds, setUploadingIds] = useState({});
+  const [pendingDeletes, setPendingDeletes] = useState([]); // مرفقات قديمة انحذفت من النافذة، ما تنحذف من Drive إلا بعد الحفظ
+  const originalAttIds = useRef(new Set((purchase.attachments || []).map((a) => a.id)));
+  function handleClose() {
+    // لو سكّر بدون حفظ: نحذف من Drive بس المرفقات اللي انرفعت بهذي الجلسة (القديمة تبقى)
+    (pur.attachments || []).forEach((a) => { if (a.fileId && !originalAttIds.current.has(a.id)) deleteFromGoogleDrive(a.fileId); });
+    onClose();
+  }
   function set(f, v) { setPur({ ...pur, [f]: v }); }
   function setLine(id, f, v) { setPur({ ...pur, lines: pur.lines.map((l) => (l.id === id ? { ...l, [f]: v } : l)) }); }
   function addLine() { setPur({ ...pur, lines: [...pur.lines, { id: uid("pl"), materialId: "", qty: "", unitCost: "", currency: "OMR", supplierInvoiceNo: "", supplierName: "", lineNote: "" }] }); }
@@ -1162,7 +1288,9 @@ function PurchaseEditor({ purchase, materials, onSave, onClose, isEdit }) {
   function removeAttachment(id) {
     const att = (pur.attachments || []).find((a) => a.id === id);
     setPur({ ...pur, attachments: (pur.attachments || []).filter((a) => a.id !== id) });
-    if (att?.fileId) deleteFromGoogleDrive(att.fileId);
+    if (!att?.fileId) return;
+    if (originalAttIds.current.has(id)) setPendingDeletes((d) => [...d, att.fileId]);
+    else deleteFromGoogleDrive(att.fileId);
   }
 
   const validLines = pur.lines.filter((l) => l.materialId && l.qty);
@@ -1172,13 +1300,13 @@ function PurchaseEditor({ purchase, materials, onSave, onClose, isEdit }) {
   const isUploading = Object.keys(uploadingIds).length > 0;
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div className="modal-overlay" onClick={handleClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head"><h3>{isEdit ? "تعديل" : "تسجيل"} عملية شراء #{pur.number}</h3><button className="icon-btn" onClick={onClose}><X size={18} /></button></div>
+        <div className="modal-head"><h3>{isEdit ? "تعديل" : "تسجيل"} عملية شراء #{pur.number}</h3><button className="icon-btn" onClick={handleClose}><X size={18} /></button></div>
         <div className="modal-body">
           {isEdit && (
             <p className="field-hint" style={{ marginBottom: 10, background: "var(--panel-soft, #fff7e0)", padding: 8, borderRadius: 8 }}>
-              ⚠️ أي تعديل هنا بيحدّث تلقائيًا كمية ومتوسط تكلفة المواد المتأثرة. لو تم استخدام هذي المواد بعد هذا الشراء (دفعة إنتاج مثلاً)، تحديث متوسط التكلفة يكون تقريبي، فحاول تعدّل مشتريات قديمة بأقرب وقت لما تلاحظ الخطأ.
+              ✔ التعديل يحدّث نفس سجل الشراء (ما يضيف شراء جديد) ويعيد حساب كمية ومتوسط تكلفة المواد المتأثرة بدقة، حسب ترتيب التواريخ وبعد احتساب اللي انستهلك بالإنتاج. لو التعديل بيخلي المخزون ناقص، البرنامج يرفضه ويوضح السبب.
             </p>
           )}
           <div className="form-row">
@@ -1276,8 +1404,8 @@ function PurchaseEditor({ purchase, materials, onSave, onClose, isEdit }) {
           </div>
         </div>
         <div className="modal-foot">
-          <button className="btn-ghost" onClick={onClose}>إلغاء</button>
-          <button className="btn-primary" disabled={!canSave || isUploading} onClick={() => onSave(pur)}>
+          <button className="btn-ghost" onClick={handleClose}>إلغاء</button>
+          <button className="btn-primary" disabled={!canSave || isUploading} onClick={() => onSave(pur, pendingDeletes)}>
             {isUploading ? "بانتظار اكتمال الرفع..." : isEdit ? "حفظ التعديلات" : "حفظ الشراء"}
           </button>
         </div>
@@ -1658,6 +1786,7 @@ function ProductionTab({ data, persist, currentUser }) {
   }
 
   function save() {
+    if (shortages.length > 0) return;
     const totalCost = form.lines.reduce((s, l) => s + (Number(l.qty) || 0) * (Number(l.unitCost) || 0), 0);
     const unitsProduced = Number(form.unitsProduced) || 0;
     const batch = { ...form, totalCost, unitCost: unitsProduced > 0 ? totalCost / unitsProduced : 0, unitsProduced, createdBy: currentUser?.name };
@@ -1675,10 +1804,17 @@ function ProductionTab({ data, persist, currentUser }) {
     });
   }
 
-  const insufficient = form ? form.lines.filter((l) => {
-    const mat = data.materials.find((m) => m.id === l.materialId);
-    return mat && (Number(mat.stock) || 0) < (Number(l.qty) || 0);
-  }) : [];
+  // المطلوب لكل مادة (مجمّع لو تكررت) مقابل المتوفر — لو ما يكفي ما ينحفظ
+  const shortages = (() => {
+    if (!form) return [];
+    const need = {};
+    form.lines.forEach((l) => { if (l.materialId) need[l.materialId] = (need[l.materialId] || 0) + (Number(l.qty) || 0); });
+    return Object.keys(need).map((id) => {
+      const mat = data.materials.find((m) => m.id === id);
+      const have = Number(mat?.stock) || 0;
+      return mat && need[id] > have + 1e-9 ? { name: mat.name, unit: mat.unit, need: need[id], have } : null;
+    }).filter(Boolean);
+  })();
 
   return (
     <div className="page">
@@ -1757,10 +1893,13 @@ function ProductionTab({ data, persist, currentUser }) {
                 </table>
               </div>
 
-              {insufficient.length > 0 && (
-                <div className="alert-banner" style={{ marginTop: 10 }}>
-                  <AlertCircle size={15} />
-                  <span>تنبيه: بعض المواد بالمخزون أقل من الكمية المطلوبة، بس تقدر تكمل التسجيل.</span>
+              {shortages.length > 0 && (
+                <div className="alert-banner" style={{ marginTop: 10, flexDirection: "column", alignItems: "flex-start", gap: 4 }}>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", fontWeight: 700 }}><AlertCircle size={15} /> ما تقدر تسجل الدفعة — المخزون ما يكفي:</div>
+                  {shortages.map((x) => (
+                    <div key={x.name}>• {x.name}: المطلوب {fmt(x.need)} {x.unit} والمتوفر {fmt(x.have)} {x.unit} (ناقص {fmt(x.need - x.have)})</div>
+                  ))}
+                  <div>سجّل شراء للمادة أول، أو قلّل الكمية.</div>
                 </div>
               )}
 
@@ -1773,7 +1912,7 @@ function ProductionTab({ data, persist, currentUser }) {
             </div>
             <div className="modal-foot">
               <button className="btn-ghost" onClick={() => setForm(null)}>إلغاء</button>
-              <button className="btn-primary" onClick={save}>حفظ الدفعة</button>
+              <button className="btn-primary" onClick={save} disabled={shortages.length > 0}>حفظ الدفعة</button>
             </div>
           </div>
         </div>
