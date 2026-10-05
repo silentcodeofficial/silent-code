@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Boxes, Factory, Package, Receipt, Megaphone, AlertTriangle,
   Building2, Settings as SettingsIcon, Plus, Trash2, Printer, X, TrendingUp,
   TrendingDown, Loader2, ChevronLeft, Users, PackageX, Sparkles, AlertCircle,
-  ShoppingCart, Wallet, Pencil, Wrench, FileText
+  ShoppingCart, Wallet, Pencil, Wrench, FileText, Globe, RefreshCw
 } from "lucide-react";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -11,6 +11,7 @@ import {
 } from "recharts";
 import { loadAppData, saveAppData, defaultAppData, watchAuth, signIn, signOutUser, resetPassword, ensureDailyBackup, listBackupDates, loadBackup } from "./firebase";
 import { uploadToGoogleDrive, deleteFromGoogleDrive } from "./googleDrive";
+import { pullWebOrders, ackWebOrders, pushWebStock, matchWebItems, buildInvoiceFromWebOrder, muscatDate, listOffers, saveOffer, deleteOffer, saveCode, deleteCode } from "./webOrders";
 
 /* ============================== helpers ============================== */
 
@@ -682,6 +683,13 @@ export default function CostingApp() {
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("dashboard");
   const [authUser, setAuthUser] = useState(undefined); // undefined = not checked yet, null = signed out, object = signed in
+  const dataRef = useRef(null); // آخر نسخة من البيانات (للاستيراد التلقائي الخلفي بدون مشكلة نسخة قديمة)
+  dataRef.current = data;
+  const syncingRef = useRef(false);
+  const syncRef = useRef(null);
+  const [webState, setWebState] = useState({ pending: [], warnings: [], lastCheck: null, busy: false, error: "", importedNow: 0, stockSyncedAt: null, stockError: "" });
+  const lastStockRef = useRef("");
+  const pushStockRef = useRef(null);
 
   useEffect(() => {
     const unsub = watchAuth((user) => setAuthUser(user || null));
@@ -707,14 +715,158 @@ export default function CostingApp() {
   }, [authUser]);
 
   async function persist(next) {
-    const prev = data;
+    const prev = dataRef.current ?? data;
+    dataRef.current = next;
     setData(next);
     try {
       await saveAppData(prev, next);
+      return true;
     } catch (e) {
       console.error("save error", e);
+      return false;
     }
   }
+
+  /* ---- استيراد طلبات الموقع المدفوعة كفواتير بيع ---- */
+  function stockWarningsFor(nextData, orders) {
+    const out = [];
+    orders.forEach((o) => {
+      (o.items || []).forEach((it) => {
+        const prodId = it.productId;
+        if (!prodId) return;
+        const avail = availableToSell(nextData, prodId);
+        if (avail < 0) {
+          const p = nextData.products.find((x) => x.id === prodId);
+          out.push(`⚠️ مخزون «${p ? p.name : prodId}» صار بالسالب (${avail}) بعد طلب الموقع — سجّل دفعة إنتاج أو راجع الكمية.`);
+        }
+      });
+    });
+    return [...new Set(out)];
+  }
+
+  async function syncWebOrders() {
+    if (syncingRef.current || !dataRef.current) return;
+    syncingRef.current = true;
+    setWebState((s) => ({ ...s, busy: true, error: "" }));
+    try {
+      const orders = await pullWebOrders();
+      let cur = dataRef.current;
+      const already = new Set(cur.invoices.map((i) => i.webOrderRef).filter(Boolean));
+      const ackRefs = orders.filter((o) => already.has(o.client_reference_id)).map((o) => o.client_reference_id);
+      const fresh = orders.filter((o) => !already.has(o.client_reference_id));
+
+      const auto = [];
+      const manual = [];
+      fresh.forEach((o) => {
+        const m = matchWebItems(o, cur.products, cur.settings.webProductMap);
+        (m.length > 0 && m.every((x) => x.productId) ? auto : manual).push(o);
+      });
+
+      let warnings = [];
+      if (auto.length > 0) {
+        let next = cur;
+        const importedItems = [];
+        auto.forEach((o) => {
+          const m = matchWebItems(o, next.products, next.settings.webProductMap);
+          const inv = buildInvoiceFromWebOrder(o, m, next.nextInvoiceNo, uid);
+          next = { ...next, invoices: [...next.invoices, inv], nextInvoiceNo: next.nextInvoiceNo + 1 };
+          importedItems.push({ items: inv.items });
+        });
+        const ok = await persist(next);
+        if (ok) {
+          ackRefs.push(...auto.map((o) => o.client_reference_id));
+          warnings = stockWarningsFor(next, importedItems);
+        } else {
+          manual.push(...auto); // فشل الحفظ: نخليها تظهر بالتبويب ونعيد المحاولة
+        }
+      }
+      if (ackRefs.length > 0) await ackWebOrders(ackRefs);
+
+      setWebState((s) => ({
+        ...s,
+        pending: manual,
+        warnings: [...new Set([...(auto.length ? warnings : s.warnings)])],
+        lastCheck: new Date(),
+        busy: false,
+        error: "",
+        importedNow: auto.length,
+      }));
+      lastStockRef.current = ""; // بعد كل فحص نعيد إرسال المخزون (يصحّح خصم الطلبات اللي انستوردت للتو)
+      if (pushStockRef.current) await pushStockRef.current();
+    } catch (e) {
+      console.error("web sync error", e);
+      setWebState((s) => ({ ...s, busy: false, error: "تعذر الاتصال بالموقع الآن — بنحاول مرة ثانية تلقائيًا." }));
+    } finally {
+      syncingRef.current = false;
+    }
+  }
+  syncRef.current = syncWebOrders;
+
+  // مزامنة المخزون: نرسل "المتاح للبيع" لكل منتج للموقع (يتحدّث فقط لو تغيّر شي عن آخر مرة)
+  async function pushStockNow() {
+    const cur = dataRef.current;
+    if (!cur) return;
+    const rev = {};
+    Object.entries(cur.settings.webProductMap || {}).forEach(([webId, accId]) => { rev[accId] = webId; });
+    const snap = cur.products.map((p) => ({
+      code: p.code || "",
+      name_en: p.nameEn || "",
+      web_product_id: rev[p.id] || null,
+      available: Math.max(0, Math.floor(availableToSell(cur, p.id))),
+    }));
+    const key = JSON.stringify(snap);
+    if (key === lastStockRef.current) return;
+    try {
+      await pushWebStock(snap);
+      lastStockRef.current = key;
+      setWebState((s) => ({ ...s, stockSyncedAt: new Date(), stockError: "" }));
+    } catch (e) {
+      console.error("stock push error", e);
+      setWebState((s) => ({ ...s, stockError: "تعذر تحديث مخزون الموقع — بنعيد المحاولة تلقائيًا." }));
+    }
+  }
+  pushStockRef.current = pushStockNow;
+
+  // أي تغيير بالبيانات (فاتورة، دفعة إنتاج، سامبل، خسارة...) ← بعد 4 ثواني نحدّث مخزون الموقع
+  useEffect(() => {
+    if (!authUser || !data) return;
+    const t = setTimeout(() => pushStockRef.current && pushStockRef.current(), 4000);
+    return () => clearTimeout(t);
+  }, [data, authUser]);
+
+  // استيراد يدوي لطلب فيه أصناف ما انطابقت تلقائيًا (المستخدم يختار المنتج المقابل)
+  async function importManualWebOrder(order, selection) {
+    const cur = dataRef.current;
+    const m = (order.items || []).map((item, idx) => ({ item, productId: selection[idx] }));
+    if (m.some((x) => !x.productId)) return false;
+    const webProductMap = { ...(cur.settings.webProductMap || {}) };
+    m.forEach((x) => { if (x.item.product_id != null) webProductMap[String(x.item.product_id)] = x.productId; });
+    const inv = buildInvoiceFromWebOrder(order, m, cur.nextInvoiceNo, uid);
+    const next = {
+      ...cur,
+      invoices: [...cur.invoices, inv],
+      nextInvoiceNo: cur.nextInvoiceNo + 1,
+      settings: { ...cur.settings, webProductMap },
+    };
+    const ok = await persist(next);
+    if (!ok) return false;
+    try { await ackWebOrders([order.client_reference_id]); } catch (e) { /* يتكرر الإشعار بالدورة الجاية */ }
+    setWebState((s) => ({
+      ...s,
+      pending: s.pending.filter((o) => o.client_reference_id !== order.client_reference_id),
+      warnings: [...new Set([...s.warnings, ...stockWarningsFor(next, [{ items: inv.items }])])],
+    }));
+    return true;
+  }
+
+  // فحص الموقع أول ما تنحمّل البيانات، وبعدها كل دقيقة ما دام البرنامج مفتوح
+  const dataReady = !!data;
+  useEffect(() => {
+    if (!authUser || !dataReady) return;
+    const t0 = setTimeout(() => syncRef.current && syncRef.current(), 1500);
+    const timer = setInterval(() => syncRef.current && syncRef.current(), 60000);
+    return () => { clearTimeout(t0); clearInterval(timer); };
+  }, [authUser, dataReady]);
 
   async function handleLogout() {
     clearActivity();
@@ -795,6 +947,8 @@ export default function CostingApp() {
     { id: "products", label: "المنتجات والوصفات", icon: Package },
     { id: "production", label: "دفعات الإنتاج", icon: Factory },
     { id: "invoices", label: "فواتير البيع", icon: Receipt },
+    { id: "webOrders", label: "طلبات الموقع", icon: Globe, badge: webState.pending.length + webState.warnings.length },
+    { id: "offers", label: "العروض والخصومات", icon: Sparkles },
     { id: "customers", label: "العملاء", icon: Users },
     { id: "marketing", label: "التسويق والسامبلات", icon: Megaphone },
     { id: "losses", label: "خسائر التصنيع", icon: AlertTriangle },
@@ -819,6 +973,7 @@ export default function CostingApp() {
             <button key={n.id} className={`nav-item ${tab === n.id ? "active" : ""}`} onClick={() => setTab(n.id)}>
               <n.icon size={17} strokeWidth={2} />
               <span>{n.label}</span>
+              {n.badge > 0 && <span className="badge amber" style={{ marginRight: "auto" }}>{n.badge}</span>}
             </button>
           ))}
         </nav>
@@ -840,6 +995,8 @@ export default function CostingApp() {
         {tab === "products" && <ProductsTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "production" && <ProductionTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "invoices" && <InvoicesTab data={data} persist={persist} currentUser={currentUser} />}
+        {tab === "webOrders" && <WebOrdersTab data={data} webState={webState} onSync={syncWebOrders} onImport={importManualWebOrder} />}
+        {tab === "offers" && <OffersTab />}
         {tab === "customers" && <CustomersTab data={data} persist={persist} />}
         {tab === "marketing" && <MarketingTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "losses" && <LossesTab data={data} persist={persist} currentUser={currentUser} />}
@@ -2278,6 +2435,364 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
 }
 
 /* ============================== customers ============================== */
+
+/* ============================== web orders (طلبات الموقع) ============================== */
+
+function WebOrderCard({ order, data, onImport }) {
+  const initial = matchWebItems(order, data.products, data.settings.webProductMap).map((m) => m.productId || "");
+  const [selection, setSelection] = useState(initial);
+  const [busy, setBusy] = useState(false);
+  const total = (Number(order.total_amount) || 0) / 1000;
+  const ready = selection.length > 0 && selection.every(Boolean);
+  return (
+    <div className="panel" style={{ marginBottom: 12 }}>
+      <div className="panel-head">
+        <h3>طلب {order.client_reference_id}</h3>
+        <span className="badge amber">يحتاج مطابقة</span>
+      </div>
+      <p style={{ margin: "0 0 10px", fontSize: 12.5, color: "var(--ink-soft)" }}>
+        {muscatDate(order.created_at)} · {order.customer_name} · {order.phone} · الإجمالي {fmt(total)} ر.ع
+        {order.discount_code ? ` · كود خصم ${order.discount_code}` : ""}
+      </p>
+      <div className="mini-list">
+        <div className="mini-list-title">اختر المنتج المقابل بالبرنامج لكل صنف (يتذكّره البرنامج للمرات الجاية)</div>
+        {(order.items || []).map((it, idx) => (
+          <div className="mini-list-row" key={idx} style={{ gap: 10, alignItems: "center" }}>
+            <span style={{ flex: 1 }}>{it.name} {it.code ? `(${it.code})` : ""} × {it.quantity}</span>
+            <select
+              value={selection[idx] || ""}
+              onChange={(e) => setSelection(selection.map((v, i) => (i === idx ? e.target.value : v)))}
+              style={{ minWidth: 190 }}
+            >
+              <option value="">— اختر المنتج —</option>
+              {data.products.map((p) => <option key={p.id} value={p.id}>{p.code ? `${p.code} — ` : ""}{p.name}</option>)}
+            </select>
+          </div>
+        ))}
+      </div>
+      <button
+        className="btn-primary" style={{ marginTop: 12 }} disabled={!ready || busy}
+        onClick={async () => { setBusy(true); await onImport(order, selection); setBusy(false); }}
+      >
+        <Plus size={15} /> {busy ? "..." : "استيراد كفاتورة بيع"}
+      </button>
+    </div>
+  );
+}
+
+function WebOrdersTab({ data, webState, onSync, onImport }) {
+  const webInvoices = data.invoices.filter((i) => i.source === "website").slice(-15).reverse();
+  return (
+    <div className="page">
+      <PageHead
+        eyebrow="المتجر الإلكتروني"
+        title="طلبات الموقع"
+        desc="الطلبات المدفوعة بالموقع تتحول تلقائيًا لفواتير بيع وتنخصم من المتاح للبيع. يفحص البرنامج الموقع كل دقيقة وهو مفتوح."
+        action={<button className="btn-ghost" onClick={onSync} disabled={webState.busy}><RefreshCw size={15} /> {webState.busy ? "جاري الفحص..." : "افحص الآن"}</button>}
+      />
+
+      {webState.error && <div className="alert-banner" style={{ marginBottom: 12 }}><AlertCircle size={15} /> {webState.error}</div>}
+      {webState.stockError && <div className="alert-banner" style={{ marginBottom: 12 }}><AlertCircle size={15} /> {webState.stockError}</div>}
+      {webState.warnings.map((w, i) => (
+        <div className="alert-banner" key={i} style={{ marginBottom: 8 }}>{w}</div>
+      ))}
+      <p style={{ margin: "0 0 14px", fontSize: 12, color: "var(--ink-soft)" }}>
+        {webState.lastCheck ? `آخر فحص: ${webState.lastCheck.toLocaleTimeString("ar-OM")}` : "لسا ما تم الفحص"}
+        {webState.importedNow > 0 ? ` · انستورد ${webState.importedNow} طلب جديد بالفحص الأخير ✅` : ""}
+        {webState.stockSyncedAt ? ` · آخر تحديث لمخزون الموقع: ${webState.stockSyncedAt.toLocaleTimeString("ar-OM")}` : ""}
+      </p>
+
+      {webState.pending.length > 0 && webState.pending.map((o) => (
+        <WebOrderCard key={o.client_reference_id} order={o} data={data} onImport={onImport} />
+      ))}
+
+      {webState.pending.length === 0 && (
+        <div className="panel" style={{ marginBottom: 14 }}>
+          <div className="panel-head"><h3>ما فيه طلبات تنتظر مطابقة</h3></div>
+          <p style={{ margin: 0, fontSize: 12.5, color: "var(--ink-soft)" }}>كل طلبات الموقع المدفوعة انستوردت. أي طلب جديد ينزل هنا تلقائيًا.</p>
+        </div>
+      )}
+
+      <div className="panel">
+        <div className="panel-head"><h3>آخر فواتير الموقع</h3></div>
+        {webInvoices.length === 0 ? (
+          <p style={{ margin: 0, fontSize: 12.5, color: "var(--ink-soft)" }}>ما فيه فواتير من الموقع بعد.</p>
+        ) : (
+          <div className="mini-list">
+            {webInvoices.map((inv) => (
+              <div className="mini-list-row" key={inv.id}>
+                <span>#{inv.number} · {inv.date} · {inv.customerName}</span>
+                <span className="num">{fmt(invoiceComputed(inv).grandTotal)} ر.ع</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function offerStatus(o, now) {
+  if (!o.active) return { label: "موقوف", cls: "" };
+  if (o.starts_at && new Date(o.starts_at) > now) return { label: "مجدول", cls: "blue" };
+  if (o.ends_at && new Date(o.ends_at) <= now) return { label: "منتهي", cls: "" };
+  if (o.max_orders != null && o.used >= o.max_orders) return { label: "اكتمل العدد", cls: "" };
+  return { label: "شغّال الآن", cls: "green" };
+}
+
+function addDaysDate(days) {
+  const d = new Date(Date.now() + days * 86400000);
+  return d.toLocaleDateString("en-CA", { timeZone: "Asia/Muscat" });
+}
+
+function OffersTab() {
+  const [state, setState] = useState({ loading: true, error: "", offers: [], codes: [], products: [], now: new Date() });
+  const [busy, setBusy] = useState(false);
+  const blank = { name: "", percent: "", scope: "all", productIds: [], startDate: "", endDate: "", maxOrders: "" };
+  const [form, setForm] = useState(blank);
+  const [formError, setFormError] = useState("");
+  const [codeForm, setCodeForm] = useState({ code: "", kind: "percent", value: "", maxUses: "", expires: "" });
+  const [codeError, setCodeError] = useState("");
+  const [confirmState, setConfirmState] = useState(null);
+
+  async function reload() {
+    try {
+      const r = await listOffers();
+      setState({ loading: false, error: "", offers: r.offers || [], codes: r.codes || [], products: r.products || [], now: new Date(r.now || Date.now()) });
+    } catch (e) {
+      setState((s) => ({ ...s, loading: false, error: "تعذر الاتصال بالموقع. تأكد من الإنترنت ومن تركيب دالة accounting-orders. (" + (e.message || e) + ")" }));
+    }
+  }
+  useEffect(() => { reload(); }, []);
+
+  const productLabel = (p) => `${p.code ? p.code + " — " : ""}${p.name_ar || p.name_en || ""}`;
+  const productById = useMemo(() => Object.fromEntries(state.products.map((p) => [String(p.id), p])), [state.products]);
+
+  async function createOffer(e) {
+    e.preventDefault();
+    setFormError("");
+    const pct = Number(form.percent);
+    if (!form.name.trim()) return setFormError("اكتب اسم للعرض (مثلًا: عرض الافتتاح).");
+    if (!(pct > 0 && pct < 100)) return setFormError("نسبة الخصم لازم تكون بين 1 و 99.");
+    if (form.scope === "products" && form.productIds.length === 0) return setFormError("اختر عطر واحد على الأقل.");
+    if (form.maxOrders !== "" && !(Number.isInteger(Number(form.maxOrders)) && Number(form.maxOrders) >= 1)) return setFormError("عدد الطلبات لازم يكون رقم صحيح.");
+    if (form.startDate && form.endDate && form.endDate < form.startDate) return setFormError("تاريخ النهاية قبل تاريخ البداية.");
+    setBusy(true);
+    try {
+      await saveOffer({
+        name: form.name.trim(),
+        percent_off: pct,
+        applies_to: form.scope,
+        product_ids: form.scope === "products" ? form.productIds : [],
+        starts_at: form.startDate ? `${form.startDate}T00:00:00+04:00` : null,
+        ends_at: form.endDate ? `${form.endDate}T23:59:59+04:00` : null,
+        max_orders: form.maxOrders === "" ? null : Number(form.maxOrders),
+        active: true,
+      });
+      setForm(blank);
+      await reload();
+    } catch (err) {
+      setFormError("ما انحفظ العرض: " + (err.message || err));
+    }
+    setBusy(false);
+  }
+
+  async function toggleOffer(o) {
+    setBusy(true);
+    try { await saveOffer({ ...o, active: !o.active }); await reload(); } catch (err) { setState((s) => ({ ...s, error: String(err.message || err) })); }
+    setBusy(false);
+  }
+
+  function removeOffer(o) {
+    setConfirmState({
+      message: `حذف العرض "${o.name}" نهائيًا؟ الطلبات السابقة ما تتأثر.`,
+      onConfirm: async () => { try { await deleteOffer(o.id); await reload(); } catch (err) { setState((s) => ({ ...s, error: String(err.message || err) })); } },
+    });
+  }
+
+  async function createCode(e) {
+    e.preventDefault();
+    setCodeError("");
+    const v = Number(codeForm.value);
+    if (!(v > 0)) return setCodeError("اكتب قيمة الخصم.");
+    setBusy(true);
+    try {
+      await saveCode({
+        code: codeForm.code,
+        percent_off: codeForm.kind === "percent" ? v : null,
+        amount_off: codeForm.kind === "amount" ? v : null,
+        max_uses: codeForm.maxUses === "" ? null : Number(codeForm.maxUses),
+        expires_at: codeForm.expires ? `${codeForm.expires}T23:59:59+04:00` : null,
+        active: true,
+      });
+      setCodeForm({ code: "", kind: "percent", value: "", maxUses: "", expires: "" });
+      await reload();
+    } catch (err) {
+      setCodeError(err.message === "invalid_code" ? "الكود لازم يكون حروف إنجليزية أو أرقام (3 إلى 30)." : "ما انحفظ الكود: " + (err.message || err));
+    }
+    setBusy(false);
+  }
+
+  async function toggleCode(c) {
+    setBusy(true);
+    try {
+      await saveCode({ code: c.code, percent_off: c.percent_off, amount_off: c.amount_off, max_uses: c.max_uses, expires_at: c.expires_at, active: !c.active });
+      await reload();
+    } catch (err) { setState((s) => ({ ...s, error: String(err.message || err) })); }
+    setBusy(false);
+  }
+
+  function removeCode(c) {
+    setConfirmState({
+      message: `حذف الكود ${c.code} نهائيًا؟`,
+      onConfirm: async () => { try { await deleteCode(c.code); await reload(); } catch (err) { setState((s) => ({ ...s, error: String(err.message || err) })); } },
+    });
+  }
+
+  function toggleProduct(id) {
+    setForm((f) => ({ ...f, productIds: f.productIds.includes(id) ? f.productIds.filter((x) => x !== id) : [...f.productIds, id] }));
+  }
+
+  return (
+    <div className="page">
+      <PageHead
+        eyebrow="المتجر الإلكتروني"
+        title="العروض والخصومات"
+        desc="العرض يظهر تلقائيًا لكل زوار الموقع بدون كود: السعر القديم مشطوب والسعر الجديد وعليه نسبة الخصم. الخصم يتحسب بالسيرفر، فما أحد يقدر يتلاعب فيه."
+        action={<button className="btn-ghost" onClick={reload} disabled={busy}><RefreshCw size={15} /> تحديث</button>}
+      />
+      {state.error && <div className="alert-banner" style={{ marginBottom: 12 }}><AlertCircle size={15} /> {state.error}</div>}
+      {confirmState && (
+        <div className="alert-banner" style={{ marginBottom: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <span style={{ flex: 1 }}>{confirmState.message}</span>
+          <button className="btn-primary" onClick={async () => { const c = confirmState; setConfirmState(null); await c.onConfirm(); }}>نعم، احذف</button>
+          <button className="btn-ghost" onClick={() => setConfirmState(null)}>إلغاء</button>
+        </div>
+      )}
+
+      <div className="panel" style={{ marginBottom: 14 }}>
+        <div className="panel-head"><h3>عرض جديد</h3></div>
+        <form onSubmit={createOffer}>
+          <div className="grid-2">
+            <Field label="اسم العرض (يظهر للعميل)">
+              <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="عرض الافتتاح" maxLength={80} />
+            </Field>
+            <Field label="نسبة الخصم %">
+              <input type="number" min="1" max="99" value={form.percent} onChange={(e) => setForm({ ...form, percent: e.target.value })} placeholder="20" />
+            </Field>
+          </div>
+
+          <Field label="على أي عطور؟">
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button type="button" className={form.scope === "all" ? "btn-primary" : "btn-ghost"} onClick={() => setForm({ ...form, scope: "all" })}>كل العطور</button>
+              <button type="button" className={form.scope === "products" ? "btn-primary" : "btn-ghost"} onClick={() => setForm({ ...form, scope: "products" })}>عطور محددة</button>
+            </div>
+          </Field>
+          {form.scope === "products" && (
+            <div className="mini-list" style={{ marginBottom: 12 }}>
+              {state.products.map((p) => (
+                <label className="mini-list-row" key={p.id} style={{ cursor: "pointer", gap: 10 }}>
+                  <input type="checkbox" checked={form.productIds.includes(String(p.id))} onChange={() => toggleProduct(String(p.id))} />
+                  <span style={{ flex: 1 }}>{productLabel(p)}</span>
+                  <span className="num">{p.price != null ? `${Number(p.price).toFixed(3)} ر.ع` : "—"}</span>
+                </label>
+              ))}
+            </div>
+          )}
+
+          <div className="grid-2">
+            <Field label="يبدأ (فاضي = الآن)">
+              <input type="date" value={form.startDate} onChange={(e) => setForm({ ...form, startDate: e.target.value })} />
+            </Field>
+            <Field label="ينتهي (فاضي = ما له نهاية)">
+              <input type="date" value={form.endDate} onChange={(e) => setForm({ ...form, endDate: e.target.value })} />
+            </Field>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "-4px 0 12px" }}>
+            <button type="button" className="btn-ghost" onClick={() => setForm({ ...form, endDate: addDaysDate(7) })}>أسبوع من اليوم</button>
+            <button type="button" className="btn-ghost" onClick={() => setForm({ ...form, endDate: addDaysDate(30) })}>شهر من اليوم</button>
+            <button type="button" className="btn-ghost" onClick={() => setForm({ ...form, endDate: "" })}>بدون نهاية</button>
+          </div>
+
+          <Field label="لأول كم طلب فقط؟ (اتركه فاضي لو العرض لكل العملاء)" hint="مثال: اكتب 10 فيصير الخصم لأول 10 طلبات، وبعدها يختفي تلقائيًا. الحد يُحسب لكل طلب (مو لكل قطعة).">
+            <input type="number" min="1" value={form.maxOrders} onChange={(e) => setForm({ ...form, maxOrders: e.target.value })} placeholder="10" />
+          </Field>
+
+          {formError && <div className="alert-banner" style={{ marginBottom: 10 }}><AlertCircle size={15} /> {formError}</div>}
+          <button className="btn-primary" type="submit" disabled={busy}><Plus size={15} /> {busy ? "..." : "تفعيل العرض"}</button>
+        </form>
+      </div>
+
+      <div className="panel" style={{ marginBottom: 14 }}>
+        <div className="panel-head"><h3>العروض الحالية والسابقة</h3></div>
+        {state.loading ? (
+          <p style={{ margin: 0, fontSize: 12.5, color: "var(--ink-soft)" }}>جاري التحميل...</p>
+        ) : state.offers.length === 0 ? (
+          <p style={{ margin: 0, fontSize: 12.5, color: "var(--ink-soft)" }}>ما فيه عروض بعد.</p>
+        ) : (
+          <div className="mini-list">
+            {state.offers.map((o) => {
+              const st = offerStatus(o, state.now);
+              const names = o.applies_to === "all" ? "كل العطور" : (o.product_ids || []).map((id) => productById[String(id)]?.name_ar || productById[String(id)]?.name_en || id).join("، ");
+              const when = `${o.starts_at ? "من " + muscatDate(o.starts_at) : "من البداية"} ${o.ends_at ? "إلى " + muscatDate(o.ends_at) : "بدون نهاية"}`;
+              return (
+                <div className="mini-list-row" key={o.id} style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                  <span style={{ flex: 1, minWidth: 220 }}>
+                    <strong>{o.name}</strong> — {Number(o.percent_off)}%
+                    <div style={{ fontSize: 12, color: "var(--ink-soft)" }}>
+                      {names} · {when}{o.max_orders != null ? ` · استُخدم ${o.used} من ${o.max_orders} طلب` : o.used ? ` · ${o.used} طلب` : ""}
+                    </div>
+                  </span>
+                  <span className={`badge ${st.cls}`}>{st.label}</span>
+                  <button className="btn-ghost" disabled={busy} onClick={() => toggleOffer(o)}>{o.active ? "إيقاف" : "تشغيل"}</button>
+                  <button className="btn-ghost" disabled={busy} onClick={() => removeOffer(o)}><Trash2 size={14} /></button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <div className="panel">
+        <div className="panel-head"><h3>أكواد الخصم (يكتبها العميل بصفحة الدفع)</h3></div>
+        <p style={{ margin: "0 0 10px", fontSize: 12, color: "var(--ink-soft)" }}>الكود يتطبّق بعد العروض. الكود يكتبه العميل بحروف إنجليزية.</p>
+        <form onSubmit={createCode}>
+          <div className="grid-2">
+            <Field label="الكود"><input value={codeForm.code} onChange={(e) => setCodeForm({ ...codeForm, code: e.target.value.toUpperCase() })} placeholder="WELCOME10" dir="ltr" /></Field>
+            <Field label="نوع الخصم">
+              <select value={codeForm.kind} onChange={(e) => setCodeForm({ ...codeForm, kind: e.target.value })}>
+                <option value="percent">نسبة مئوية %</option>
+                <option value="amount">مبلغ ثابت (ر.ع)</option>
+              </select>
+            </Field>
+            <Field label="القيمة"><input type="number" step="any" value={codeForm.value} onChange={(e) => setCodeForm({ ...codeForm, value: e.target.value })} /></Field>
+            <Field label="أقصى عدد استخدامات (اختياري)"><input type="number" min="1" value={codeForm.maxUses} onChange={(e) => setCodeForm({ ...codeForm, maxUses: e.target.value })} /></Field>
+            <Field label="ينتهي بتاريخ (اختياري)"><input type="date" value={codeForm.expires} onChange={(e) => setCodeForm({ ...codeForm, expires: e.target.value })} /></Field>
+          </div>
+          {codeError && <div className="alert-banner" style={{ marginBottom: 10 }}><AlertCircle size={15} /> {codeError}</div>}
+          <button className="btn-primary" type="submit" disabled={busy}><Plus size={15} /> إضافة الكود</button>
+        </form>
+        {state.codes.length > 0 && (
+          <div className="mini-list" style={{ marginTop: 14 }}>
+            {state.codes.map((c) => (
+              <div className="mini-list-row" key={c.code} style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                <span style={{ flex: 1 }}>
+                  <strong dir="ltr">{c.code}</strong> — {c.percent_off != null ? `${Number(c.percent_off)}%` : `${Number(c.amount_off).toFixed(3)} ر.ع`}
+                  <div style={{ fontSize: 12, color: "var(--ink-soft)" }}>
+                    استُخدم {c.used_count || 0}{c.max_uses != null ? ` من ${c.max_uses}` : ""}{c.expires_at ? ` · ينتهي ${muscatDate(c.expires_at)}` : ""}
+                  </div>
+                </span>
+                <span className={`badge ${c.active ? "green" : ""}`}>{c.active ? "شغّال" : "موقوف"}</span>
+                <button className="btn-ghost" disabled={busy} onClick={() => toggleCode(c)}>{c.active ? "إيقاف" : "تشغيل"}</button>
+                <button className="btn-ghost" disabled={busy} onClick={() => removeCode(c)}><Trash2 size={14} /></button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function CustomersTab({ data, persist }) {
   const [openKey, setOpenKey] = useState(null);
