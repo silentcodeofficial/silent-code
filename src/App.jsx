@@ -11,7 +11,7 @@ import {
 } from "recharts";
 import { loadAppData, saveAppData, defaultAppData, watchAuth, signIn, signOutUser, resetPassword, ensureDailyBackup, listBackupDates, loadBackup } from "./firebase";
 import { uploadToGoogleDrive, deleteFromGoogleDrive } from "./googleDrive";
-import { pullWebOrders, ackWebOrders, pushWebStock, matchWebItems, buildInvoiceFromWebOrder, muscatDate, listOffers, saveOffer, deleteOffer, saveCode, deleteCode } from "./webOrders";
+import { pullWebOrders, ackWebOrders, pushWebStock, matchWebItems, buildInvoiceFromWebOrder, muscatDate, listOffers, saveOffer, deleteOffer, saveCode, deleteCode, listWebOrders, setWebOrderStatus, FULFILLMENT_STATUSES } from "./webOrders";
 
 /* ============================== helpers ============================== */
 
@@ -272,7 +272,7 @@ const PRINT_LABELS = {
     subtotal: "المجموع", invoiceDiscount: "خصم الفاتورة", grandTotal: "الإجمالي الكلي",
     notes: "ملاحظات", thanks: "شكرًا لثقتكم بنا 🤍", gift: "🎁 هدية", currency: "ر.ع",
     periodTagline: "كشف حساب فترة (للاستخدام الداخلي)", from: "من", to: "إلى",
-    invoiceNo: "رقم الفاتورة", customer: "العميل", paymentMethod: "طريقة الدفع",
+    invoiceNo: "رقم الفاتورة", customer: "العميل", paymentMethod: "طريقة الدفع", orderRef: "رقم الطلب", paid: "مدفوعة", email: "الإيميل", country: "الدولة",
     byMethod: "التوزيع حسب طريقة الدفع", invoiceCount: "عدد الفواتير",
   },
   en: {
@@ -283,10 +283,18 @@ const PRINT_LABELS = {
     subtotal: "Subtotal", invoiceDiscount: "Invoice Discount", grandTotal: "Grand Total",
     notes: "Notes", thanks: "Thank you for your trust 🤍", gift: "🎁 Gift", currency: "OMR",
     periodTagline: "Period Statement (internal use)", from: "From", to: "To",
-    invoiceNo: "Invoice No.", customer: "Customer", paymentMethod: "Payment Method",
+    invoiceNo: "Invoice No.", customer: "Customer", paymentMethod: "Payment Method", orderRef: "Order", paid: "PAID", email: "Email", country: "Country",
     byMethod: "Breakdown by Payment Method", invoiceCount: "Invoice Count",
   },
 };
+
+// الطباعة تكتب HTML بنافذة جديدة، فأي نص كتبه عميل أو موظف (اسم، عنوان، ملاحظة) لازم يتعقّم قبل ما ينحط فيها
+const escHtml = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+const PRINT_COUNTRIES = {
+  OM: { ar: "عُمان", en: "Oman" }, AE: { ar: "الإمارات", en: "United Arab Emirates" }, SA: { ar: "السعودية", en: "Saudi Arabia" },
+  KW: { ar: "الكويت", en: "Kuwait" }, QA: { ar: "قطر", en: "Qatar" }, BH: { ar: "البحرين", en: "Bahrain" },
+};
+const PRINT_METHOD_EN = { "بوابة دفع إلكتروني": "Online payment (Thawani)", "نقدًا": "Cash", "نقدي": "Cash", "كاش": "Cash", "تحويل بنكي": "Bank transfer" };
 
 function printStyles(lang) {
   const L = PRINT_LABELS[lang];
@@ -296,42 +304,45 @@ function printStyles(lang) {
   * { box-sizing: border-box; }
   body { font-family: ${L.fontFamily}; direction: ${L.dir}; margin: 0; color: #22302B; background: #fff; }
   .sheet { max-width: 780px; margin: 0 auto; padding: 0 36px 36px; }
-  .accent-bar { height: 8px; background: linear-gradient(90deg, #0E6E5B, #17a382); }
-  .print-head { padding-top: 26px; padding-bottom: 18px; border-bottom: 1px solid #E3DCCB; margin-bottom: 20px; overflow: hidden; }
+  .accent-bar { height: 8px; background: linear-gradient(90deg, #34090e 0 72%, #C79B58 72% 100%); }
+  .print-head { padding-top: 26px; padding-bottom: 18px; border-bottom: 1px solid #E3D9C4; margin-bottom: 20px; overflow: hidden; }
   .head-col { display: inline-block; vertical-align: top; width: 48%; }
   .head-brand { text-align: ${start}; }
   .head-meta { text-align: ${end}; float: ${end}; }
-  .print-brand { font-weight: 800; font-size: 24px; letter-spacing: 1px; color: #0E6E5B; }
+  .print-brand { font-weight: 800; font-size: 24px; letter-spacing: 1px; color: #34090e; }
   .print-tagline { font-size: 11px; color: #8A9490; margin-top: 2px; }
   .biz-info { font-size: 11px; color: #6B7770; margin-top: 8px; line-height: 1.8; }
   .biz-info div { margin-bottom: 2px; }
   .doc-title { font-size: 13px; font-weight: 700; color: #6B7770; margin-bottom: 6px; letter-spacing: .5px; }
-  .invoice-badge { display: inline-block; background: #0E6E5B; color: #fff; font-weight: 800; font-size: 15px; padding: 5px 14px; border-radius: 999px; margin-bottom: 8px; }
+  .invoice-badge { display: inline-block; background: #34090e; color: #fff; font-weight: 800; font-size: 15px; padding: 5px 14px; border-radius: 999px; margin-bottom: 8px; }
   .print-meta-line { font-size: 12px; color: #444; line-height: 1.9; }
   .info-grid { overflow: hidden; margin-bottom: 20px; }
-  .info-box { box-sizing: border-box; display: inline-block; vertical-align: top; width: 48%; background: #FBF8F2; border: 1px solid #E3DCCB; border-radius: 10px; padding: 12px 14px; }
+  .info-box { box-sizing: border-box; display: inline-block; vertical-align: top; width: 48%; background: #F5F0E4; border: 1px solid #E3D9C4; border-radius: 10px; padding: 12px 14px; }
   .info-box.first { float: ${start}; }
   .info-box.second { float: ${end}; }
-  .info-box-title { font-size: 10.5px; font-weight: 700; color: #0E6E5B; margin-bottom: 6px; letter-spacing: .3px; }
+  .info-box-title { font-size: 10.5px; font-weight: 700; color: #34090e; margin-bottom: 6px; letter-spacing: .3px; }
   .info-box div.row { font-size: 12.5px; color: #333; line-height: 1.8; }
   table.items { width: 100%; border-collapse: collapse; margin-bottom: 18px; clear: both; }
-  table.items thead th { background: #0E6E5B; color: #fff; font-size: 11.5px; font-weight: 700; padding: 10px; text-align: ${start}; }
+  table.items thead th { background: #34090e; color: #fff; font-size: 11.5px; font-weight: 700; padding: 10px; text-align: ${start}; }
   table.items thead th:first-child { border-radius: ${lang === "ar" ? "8px 0 0 0" : "0 8px 0 0"}; }
   table.items thead th:last-child { border-radius: ${lang === "ar" ? "0 8px 0 0" : "8px 0 0 0"}; }
-  table.items tbody td { padding: 9px 10px; font-size: 12.5px; border-bottom: 1px solid #EFEAE0; text-align: ${start}; }
-  table.items tbody tr:nth-child(even) { background: #FBF8F2; }
+  table.items tbody td { padding: 9px 10px; font-size: 12.5px; border-bottom: 1px solid #EBE3D0; text-align: ${start}; }
+  table.items tbody tr:nth-child(even) { background: #F5F0E4; }
   .totals-wrap { overflow: hidden; margin-bottom: 20px; }
   .totals { box-sizing: border-box; display: inline-block; min-width: 260px; font-size: 12.5px; float: ${end}; }
   .totals-row { overflow: hidden; padding: 5px 0; color: #555; }
   .totals-row span:first-child { float: ${start}; }
   .totals-row span:last-child { float: ${end}; }
-  .grand-total { overflow: hidden; background: #0E6E5B; color: #fff; padding: 10px 14px; border-radius: 9px; font-weight: 800; font-size: 15px; margin-top: 6px; }
+  .grand-total { overflow: hidden; background: #34090e; color: #fff; padding: 10px 14px; border-radius: 9px; font-weight: 800; font-size: 15px; margin-top: 6px; }
   .grand-total span:first-child { float: ${start}; }
   .grand-total span:last-child { float: ${end}; }
-  .note { clear: both; margin-top: 10px; font-size: 12px; color: #444; background: #FBF8F2; border-radius: 8px; padding: 10px 12px; }
-  .foot { clear: both; margin-top: 34px; text-align: center; border-top: 1px solid #E3DCCB; padding-top: 16px; }
-  .foot-thanks { font-size: 13.5px; font-weight: 700; color: #0E6E5B; margin-bottom: 4px; }
+  .note { clear: both; margin-top: 10px; font-size: 12px; color: #444; background: #F5F0E4; border-radius: 8px; padding: 10px 12px; }
+  .foot { clear: both; margin-top: 34px; text-align: center; border-top: 1px solid #E3D9C4; padding-top: 16px; }
+  .foot-thanks { font-size: 13.5px; font-weight: 700; color: #34090e; margin-bottom: 4px; }
   .foot-note { font-size: 11px; color: #8A9490; }
+  .stamp { display: inline-block; border: 2px solid #34090e; color: #34090e; font-weight: 800; font-size: 11px; letter-spacing: 1px; padding: 2px 10px; margin-top: 6px; }
+  .row-sub { font-size: 10.5px; color: #8A9490; }
+  @media print { .sheet { padding-bottom: 0; } table.items tr { page-break-inside: avoid; } }
   bdi { unicode-bidi: isolate; }
 `;
 }
@@ -360,7 +371,7 @@ function printInvoiceNow(invoice, data, lang = "ar") {
       const prod = data.products.find((p) => p.id === it.productId);
       const name = lang === "en" ? (prod?.nameEn || prod?.name || "—") : (prod?.name || "—");
       return `<tr>
-        <td>${name}${it.free ? ` ${L.gift}` : ""}</td>
+        <td>${escHtml(name)}${it.free ? ` ${L.gift}` : ""}</td>
         <td><bdi>${it.qty}</bdi></td>
         <td><bdi>${fmt(it.price)}</bdi></td>
         <td><bdi>${it.lineDiscount ? fmt(it.lineDiscount) : "—"}</bdi></td>
@@ -370,13 +381,13 @@ function printInvoiceNow(invoice, data, lang = "ar") {
     .join("");
 
   const bizLines = [
-    biz.phone && `<div>${biz.phone}</div>`,
-    biz.address && `<div>${biz.address}</div>`,
-    biz.instagram && `<div>${biz.instagram}</div>`,
+    biz.phone && `<div>${escHtml(biz.phone)}</div>`,
+    biz.address && `<div>${escHtml(biz.address)}</div>`,
+    biz.instagram && `<div>${escHtml(biz.instagram)}</div>`,
   ].filter(Boolean).join("");
 
   const deliveryLine = invoice.deliveryType === "delivery"
-    ? `${L.deliveryType}${invoice.deliveryAddress ? `<div class="row">${invoice.deliveryAddress}</div>` : ""}`
+    ? `${L.deliveryType}${invoice.deliveryAddress ? `<div class="row">${escHtml(invoice.deliveryAddress)}</div>` : ""}`
     : L.pickup;
 
   const html = `
@@ -390,19 +401,23 @@ function printInvoiceNow(invoice, data, lang = "ar") {
         </div>
         <div class="head-col head-meta">
           <div class="doc-title">${L.docTitle}</div>
-          <div class="invoice-badge"><bdi>#${invoice.number}</bdi></div>
+          <div class="invoice-badge"><bdi>${escHtml(invoice.webInvoiceNumber || "#" + invoice.number)}</bdi></div>
           <div class="print-meta-line">
-            <div><bdi>${invoice.date}</bdi></div>
-            ${invoice.paymentMethod ? `<div>${invoice.paymentMethod}</div>` : ""}
+            <div><bdi>${escHtml(invoice.date)}</bdi></div>
+            ${invoice.webOrderRef ? `<div>${L.orderRef}: <bdi>${escHtml(invoice.webOrderRef)}</bdi></div>` : ""}
+            ${invoice.paymentMethod ? `<div>${escHtml(lang === "en" ? (PRINT_METHOD_EN[invoice.paymentMethod] || invoice.paymentMethod) : invoice.paymentMethod)}</div>` : ""}
           </div>
+          ${invoice.source === "website" ? `<div class="stamp">${L.paid}</div>` : ""}
         </div>
       </div>
 
       <div class="info-grid">
         <div class="info-box first">
           <div class="info-box-title">${L.customerInfo}</div>
-          <div class="row">${invoice.customerName || "—"}</div>
-          ${invoice.customerPhone ? `<div class="row"><bdi>${invoice.customerPhone}</bdi></div>` : ""}
+          <div class="row"><b>${escHtml(invoice.customerName || "—")}</b></div>
+          ${invoice.customerPhone ? `<div class="row"><bdi>${escHtml(invoice.customerPhone)}</bdi></div>` : ""}
+          ${invoice.customerEmail ? `<div class="row"><bdi>${escHtml(invoice.customerEmail)}</bdi></div>` : ""}
+          ${invoice.customerCountry ? `<div class="row">${escHtml(PRINT_COUNTRIES[invoice.customerCountry]?.[lang] || invoice.customerCountry)}</div>` : ""}
         </div>
         <div class="info-box second">
           <div class="info-box-title">${L.delivery}</div>
@@ -423,11 +438,11 @@ function printInvoiceNow(invoice, data, lang = "ar") {
         </div>
       </div>
 
-      ${invoice.note ? `<div class="note">${L.notes}: ${invoice.note}</div>` : ""}
+      ${invoice.note ? `<div class="note">${L.notes}: ${escHtml(invoice.note)}</div>` : ""}
 
       <div class="foot">
         <div class="foot-thanks">${L.thanks}</div>
-        <div class="foot-note">${biz.note || "SILENT CODE"}</div>
+        <div class="foot-note">${escHtml(biz.note || "SILENT CODE")}</div>
       </div>
     </div>
   `;
@@ -442,8 +457,8 @@ function printPeriodNow(period, data, lang = "ar") {
     .map((inv) => `<tr>
       <td><bdi>#${inv.number}</bdi></td>
       <td><bdi>${inv.date}</bdi></td>
-      <td>${inv.customerName || "—"}</td>
-      <td>${inv.paymentMethod || "—"}</td>
+      <td>${escHtml(inv.customerName || "—")}</td>
+      <td>${escHtml(inv.paymentMethod || "—")}</td>
       <td><bdi>${fmt(invoiceComputed(inv).grandTotal)}</bdi></td>
     </tr>`)
     .join("");
@@ -531,11 +546,13 @@ function customerStats(invoices) {
     if (!name) return;
     const key = name.toLowerCase();
     const total = (inv.items || []).reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unitPrice) || 0), 0);
-    if (!map.has(key)) map.set(key, { name, phone: inv.customerPhone || "", count: 0, total: 0, lastDate: inv.date, invoices: [] });
+    if (!map.has(key)) map.set(key, { name, phone: inv.customerPhone || "", email: "", country: "", count: 0, total: 0, lastDate: inv.date, invoices: [] });
     const c = map.get(key);
     c.count += 1;
     c.total += total;
     if (inv.customerPhone) c.phone = inv.customerPhone;
+    if (inv.customerEmail) c.email = inv.customerEmail;
+    if (inv.customerCountry) c.country = inv.customerCountry;
     if (!c.lastDate || inv.date > c.lastDate) c.lastDate = inv.date;
     c.invoices.push(inv);
   });
@@ -687,6 +704,7 @@ export default function CostingApp() {
   dataRef.current = data;
   const syncingRef = useRef(false);
   const syncRef = useRef(null);
+  const [fulfil, setFulfil] = useState({ orders: [], loading: false, error: "" });
   const [webState, setWebState] = useState({ pending: [], warnings: [], lastCheck: null, busy: false, error: "", importedNow: 0, stockSyncedAt: null, stockError: "" });
   const lastStockRef = useRef("");
   const pushStockRef = useRef(null);
@@ -791,6 +809,7 @@ export default function CostingApp() {
         error: "",
         importedNow: auto.length,
       }));
+      loadFulfillment();
       lastStockRef.current = ""; // بعد كل فحص نعيد إرسال المخزون (يصحّح خصم الطلبات اللي انستوردت للتو)
       if (pushStockRef.current) await pushStockRef.current();
     } catch (e) {
@@ -801,6 +820,21 @@ export default function CostingApp() {
     }
   }
   syncRef.current = syncWebOrders;
+
+  // متابعة تجهيز الطلبات (حالة كل طلب مدفوع بالموقع)
+  async function loadFulfillment() {
+    setFulfil((f) => ({ ...f, loading: true }));
+    try {
+      const orders = await listWebOrders();
+      setFulfil({ orders, loading: false, error: "" });
+    } catch (e) {
+      setFulfil((f) => ({ ...f, loading: false, error: "تعذر تحميل الطلبات الآن." }));
+    }
+  }
+  async function changeFulfillment(ref, status, note) {
+    const upd = await setWebOrderStatus(ref, status, note, true);
+    setFulfil((f) => ({ ...f, orders: f.orders.map((o) => (o.client_reference_id === ref ? { ...o, ...upd } : o)) }));
+  }
 
   // مزامنة المخزون: نرسل "المتاح للبيع" لكل منتج للموقع (يتحدّث فقط لو تغيّر شي عن آخر مرة)
   async function pushStockNow() {
@@ -947,7 +981,7 @@ export default function CostingApp() {
     { id: "products", label: "المنتجات والوصفات", icon: Package },
     { id: "production", label: "دفعات الإنتاج", icon: Factory },
     { id: "invoices", label: "فواتير البيع", icon: Receipt },
-    { id: "webOrders", label: "طلبات الموقع", icon: Globe, badge: webState.pending.length + webState.warnings.length },
+    { id: "webOrders", label: "طلبات الموقع", icon: Globe, badge: webState.pending.length + webState.warnings.length + fulfil.orders.filter((o) => (o.fulfillment_status || "new") === "new").length },
     { id: "offers", label: "العروض والخصومات", icon: Sparkles },
     { id: "customers", label: "العملاء", icon: Users },
     { id: "marketing", label: "التسويق والسامبلات", icon: Megaphone },
@@ -995,7 +1029,7 @@ export default function CostingApp() {
         {tab === "products" && <ProductsTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "production" && <ProductionTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "invoices" && <InvoicesTab data={data} persist={persist} currentUser={currentUser} />}
-        {tab === "webOrders" && <WebOrdersTab data={data} webState={webState} onSync={syncWebOrders} onImport={importManualWebOrder} />}
+        {tab === "webOrders" && <WebOrdersTab data={data} webState={webState} onSync={syncWebOrders} onImport={importManualWebOrder} fulfil={fulfil} onReloadFulfil={loadFulfillment} onChangeStatus={changeFulfillment} />}
         {tab === "offers" && <OffersTab />}
         {tab === "customers" && <CustomersTab data={data} persist={persist} />}
         {tab === "marketing" && <MarketingTab data={data} persist={persist} currentUser={currentUser} />}
@@ -2480,7 +2514,85 @@ function WebOrderCard({ order, data, onImport }) {
   );
 }
 
-function WebOrdersTab({ data, webState, onSync, onImport }) {
+const GCC_NAMES = { OM: "عُمان", AE: "الإمارات", SA: "السعودية", KW: "الكويت", QA: "قطر", BH: "البحرين" };
+
+function FulfillmentRow({ order, onChangeStatus }) {
+  const st = order.fulfillment_status || "new";
+  const [status, setStatus] = useState(st);
+  const [note, setNote] = useState(order.fulfillment_note || "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const meta = FULFILLMENT_STATUSES.find((x) => x.id === st) || FULFILLMENT_STATUSES[0];
+  const dirty = status !== st || note !== (order.fulfillment_note || "");
+  const wa = String(order.phone || "").replace(/[^\d]/g, "");
+  const total = (Number(order.total_amount) || 0) / 1000;
+  return (
+    <div className="panel" style={{ marginBottom: 10 }}>
+      <div className="panel-head">
+        <h3 style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <bdi>{order.invoice_number || order.client_reference_id}</bdi>
+          <span className={`badge ${meta.cls}`}>{meta.label}</span>
+        </h3>
+        <span className="num">{fmt(total)} ر.ع</span>
+      </div>
+      <p style={{ margin: "0 0 8px", fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.9 }}>
+        {muscatDate(order.created_at)} · <b style={{ color: "var(--ink)" }}>{order.customer_name}</b>
+        {" · "}{wa ? <a href={`https://wa.me/${wa}`} target="_blank" rel="noreferrer"><bdi>{order.phone}</bdi></a> : "—"}
+        {order.email ? <> · <bdi>{order.email}</bdi></> : null}
+        {order.country_code ? ` · ${GCC_NAMES[order.country_code] || order.country_code}` : ""}
+        <br />{order.delivery_address}
+        <br />{(order.items || []).map((it) => `${it.name} × ${it.quantity}`).join("، ")}
+      </p>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <select value={status} onChange={(e) => setStatus(e.target.value)} style={{ minWidth: 140 }}>
+          {FULFILLMENT_STATUSES.map((x) => <option key={x.id} value={x.id}>{x.label}</option>)}
+        </select>
+        <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="ملاحظة (مثلاً رقم التتبع — تُرسل للعميل مع إشعار الشحن)" style={{ flex: 1, minWidth: 200 }} />
+        <button
+          className="btn-primary" disabled={!dirty || busy}
+          onClick={async () => {
+            setBusy(true); setErr("");
+            try { await onChangeStatus(order.client_reference_id, status, note); } catch (e) { setErr("تعذر الحفظ، حاول مرة ثانية."); }
+            setBusy(false);
+          }}
+        >{busy ? "..." : status === "shipped" && st !== "shipped" ? "حفظ + إشعار العميل" : "حفظ"}</button>
+      </div>
+      {err && <div className="alert-banner" style={{ marginTop: 8 }}><AlertCircle size={15} /> {err}</div>}
+    </div>
+  );
+}
+
+function FulfillmentSection({ fulfil, onReload, onChangeStatus }) {
+  const [filter, setFilter] = useState("open");
+  useEffect(() => { onReload(); }, []);
+  const orders = fulfil.orders.filter((o) => {
+    const st = o.fulfillment_status || "new";
+    if (filter === "open") return st === "new" || st === "preparing";
+    if (filter === "all") return true;
+    return st === filter;
+  });
+  const count = (id) => fulfil.orders.filter((o) => (o.fulfillment_status || "new") === id).length;
+  return (
+    <div style={{ marginBottom: 22 }}>
+      <div className="panel-head" style={{ marginBottom: 10 }}>
+        <h3>متابعة تجهيز الطلبات</h3>
+        <button className="btn-ghost" onClick={onReload} disabled={fulfil.loading}><RefreshCw size={14} /> {fulfil.loading ? "..." : "تحديث"}</button>
+      </div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+        {[{ id: "open", label: `بانتظار التجهيز (${count("new") + count("preparing")})` }, ...FULFILLMENT_STATUSES.filter((x) => x.id !== "new" && x.id !== "preparing").map((x) => ({ id: x.id, label: `${x.label} (${count(x.id)})` })), { id: "all", label: "الكل" }].map((f) => (
+          <button key={f.id} className={`chip-toggle ${filter === f.id ? "active" : ""}`} onClick={() => setFilter(f.id)}>{f.label}</button>
+        ))}
+      </div>
+      {fulfil.error && <div className="alert-banner" style={{ marginBottom: 10 }}><AlertCircle size={15} /> {fulfil.error}</div>}
+      {orders.length === 0 && !fulfil.loading && (
+        <div className="panel"><p style={{ margin: 0, fontSize: 12.5, color: "var(--ink-soft)" }}>ما فيه طلبات بهذي الحالة.</p></div>
+      )}
+      {orders.map((o) => <FulfillmentRow key={o.client_reference_id + (o.fulfillment_status || "")} order={o} onChangeStatus={onChangeStatus} />)}
+    </div>
+  );
+}
+
+function WebOrdersTab({ data, webState, onSync, onImport, fulfil, onReloadFulfil, onChangeStatus }) {
   const webInvoices = data.invoices.filter((i) => i.source === "website").slice(-15).reverse();
   return (
     <div className="page">
@@ -2502,6 +2614,8 @@ function WebOrdersTab({ data, webState, onSync, onImport }) {
         {webState.stockSyncedAt ? ` · آخر تحديث لمخزون الموقع: ${webState.stockSyncedAt.toLocaleTimeString("ar-OM")}` : ""}
       </p>
 
+      <FulfillmentSection fulfil={fulfil} onReload={onReloadFulfil} onChangeStatus={onChangeStatus} />
+
       {webState.pending.length > 0 && webState.pending.map((o) => (
         <WebOrderCard key={o.client_reference_id} order={o} data={data} onImport={onImport} />
       ))}
@@ -2521,7 +2635,7 @@ function WebOrdersTab({ data, webState, onSync, onImport }) {
           <div className="mini-list">
             {webInvoices.map((inv) => (
               <div className="mini-list-row" key={inv.id}>
-                <span>#{inv.number} · {inv.date} · {inv.customerName}</span>
+                <span>#{inv.number}{inv.webInvoiceNumber ? ` (${inv.webInvoiceNumber})` : ""} · {inv.date} · {inv.customerName}</span>
                 <span className="num">{fmt(invoiceComputed(inv).grandTotal)} ر.ع</span>
               </div>
             ))}
@@ -2833,7 +2947,7 @@ function CustomersTab({ data, persist }) {
       ) : (
         <div className="table-wrap">
           <table>
-            <thead><tr><th>العميل</th><th>الهاتف</th><th>عدد مرات الشراء</th><th>إجمالي المشتريات</th><th>آخر شراء</th><th></th></tr></thead>
+            <thead><tr><th>العميل</th><th>الهاتف</th><th>الإيميل</th><th>الدولة</th><th>عدد مرات الشراء</th><th>إجمالي المشتريات</th><th>آخر شراء</th><th></th></tr></thead>
             <tbody>
               {customers.map((c) => {
                 const key = c.name.toLowerCase();
@@ -2843,6 +2957,8 @@ function CustomersTab({ data, persist }) {
                     <tr>
                       <td className="strong">{c.name}</td>
                       <td>{c.phone || "—"}</td>
+                      <td>{c.email ? <bdi>{c.email}</bdi> : "—"}</td>
+                      <td>{GCC_NAMES[c.country] || c.country || "—"}</td>
                       <td className="num">{c.count}</td>
                       <td className="num">{fmt(c.total)} ر.ع</td>
                       <td>{c.lastDate}</td>
@@ -2858,7 +2974,7 @@ function CustomersTab({ data, persist }) {
                     </tr>
                     {open && (
                       <tr>
-                        <td colSpan={6}>
+                        <td colSpan={8}>
                           <div className="mini-list">
                             <div className="mini-list-title">سجل مشتريات {c.name}</div>
                             {[...c.invoices].sort((a, b) => (a.date < b.date ? 1 : -1)).map((inv) => {
