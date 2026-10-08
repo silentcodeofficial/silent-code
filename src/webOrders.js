@@ -41,6 +41,24 @@ export async function ackWebOrders(refs) {
   return json.acked || 0;
 }
 
+// متابعة التجهيز: كل الطلبات المدفوعة (الأحدث أولًا) + تغيير حالتها. "تم الشحن" يرسل للعميل إيميل تلقائيًا.
+export async function listWebOrders() {
+  const json = await callBridge({ action: "orders_list" });
+  return Array.isArray(json.orders) ? json.orders : [];
+}
+export async function setWebOrderStatus(ref, status, note, notify = true) {
+  const json = await callBridge({ action: "order_set_status", ref, status, note, notify });
+  return json.order;
+}
+
+export const FULFILLMENT_STATUSES = [
+  { id: "new", label: "جديد", cls: "amber" },
+  { id: "preparing", label: "قيد التجهيز", cls: "blue" },
+  { id: "shipped", label: "تم الشحن", cls: "blue" },
+  { id: "delivered", label: "تم التسليم", cls: "green" },
+  { id: "cancelled", label: "ملغي", cls: "" },
+];
+
 // يرسل "المتاح للبيع" لكل منتج للموقع، فيتحدّث مخزون الموقع (0 = تظهر "نفذت الكمية" للعملاء)
 export async function pushWebStock(products) {
   const json = await callBridge({ action: "stock", products });
@@ -114,6 +132,10 @@ export function buildInvoiceFromWebOrder(order, matches, nextNo, makeId) {
     date: muscatDate(order.created_at),
     customerName: order.customer_name || "",
     customerPhone: order.phone || "",
+    customerEmail: order.email || "",
+    customerCountry: order.country_code || "",
+    webInvoiceNumber: order.invoice_number || "", // رقم الفاتورة اللي وصل للعميل بالإيميل (SC-00001)
+    invoiceLang: order.lang === "en" ? "en" : "ar",
     paymentMethod: WEB_PAYMENT_METHOD,
     note: noteParts.join(" — "),
     discountType: "fixed",
