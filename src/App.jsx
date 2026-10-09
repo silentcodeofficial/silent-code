@@ -570,10 +570,16 @@ function ConfirmModal({ state, onCancel }) {
           <AlertTriangle size={26} style={{ color: "var(--danger)", marginBottom: 10 }} />
           <p style={{ margin: "0 0 18px", fontSize: 13.5 }}>{state.message}</p>
           <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
-            <button className="btn-ghost" onClick={onCancel}>إلغاء</button>
-            <button className="btn-primary" style={{ background: "var(--danger)" }} onClick={() => { state.onConfirm(); onCancel(); }}>
-              تأكيد الحذف
-            </button>
+            {state.info ? (
+              <button className="btn-primary" onClick={onCancel}>حسنًا، فهمت</button>
+            ) : (
+              <>
+                <button className="btn-ghost" onClick={onCancel}>إلغاء</button>
+                <button className="btn-primary" style={{ background: "var(--danger)" }} onClick={() => { state.onConfirm(); onCancel(); }}>
+                  تأكيد الحذف
+                </button>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -1222,6 +1228,20 @@ function MaterialsTab({ data, persist, currentUser }) {
     setEditingMat(null);
   }
   function removeMaterial(id) {
+    const mat = data.materials.find((m) => m.id === id);
+    const usedIn = [];
+    if (data.products.some((p) => (p.recipe || []).some((l) => l.materialId === id))) usedIn.push("وصفة منتج");
+    if (data.purchases.some((p) => (p.lines || []).some((l) => l.materialId === id))) usedIn.push("سجل مشتريات");
+    if (data.batches.some((b) => (b.lines || []).some((l) => l.materialId === id))) usedIn.push("دفعة إنتاج");
+    if (data.invoices.some((i) => (i.overheadUsage || []).some((u) => u.materialId === id))) usedIn.push("فاتورة بيع");
+    if (usedIn.length) {
+      setConfirmState({
+        info: true,
+        message: `ما تقدر تحذف «${mat?.name || ""}» لأنها مستخدمة في: ${usedIn.join("، ")}. الحذف بيخرّب تكلفة المنتجات والسجلات القديمة. لو ما تبيها بعد، خلّ كميتها صفر.`,
+        onConfirm: () => {},
+      });
+      return;
+    }
     setConfirmState({
       message: "تأكيد حذف المادة؟",
       onConfirm: () => persist({ ...data, materials: data.materials.filter((m) => m.id !== id) }),
@@ -1386,7 +1406,7 @@ function MaterialsTab({ data, persist, currentUser }) {
         )}
       </div>
 
-      {editingMat && <MaterialEditor material={editingMat} onSave={saveMaterial} onClose={() => setEditingMat(null)} />}
+      {editingMat && <MaterialEditor material={editingMat} others={data.materials} onSave={saveMaterial} onClose={() => setEditingMat(null)} />}
       {purchase && (
         <PurchaseEditor
           purchase={purchase}
@@ -1401,10 +1421,15 @@ function MaterialsTab({ data, persist, currentUser }) {
   );
 }
 
-function MaterialEditor({ material, onSave, onClose }) {
+function MaterialEditor({ material, others = [], onSave, onClose }) {
   const [m, setM] = useState(material);
   const isNew = !material.name;
   function set(f, v) { setM({ ...m, [f]: v }); }
+  const code = (m.code || "").trim().toLowerCase();
+  const dupCode = !!code && others.some((x) => x.id !== m.id && (x.code || "").trim().toLowerCase() === code);
+  const dupName = others.some((x) => x.id !== m.id && (x.name || "").trim().toLowerCase() === m.name.trim().toLowerCase() && m.name.trim());
+  const negative = ["stock", "avgCost", "minThreshold"].some((f) => m[f] !== "" && m[f] != null && Number(m[f]) < 0);
+  const problem = !m.name.trim() ? "اكتب اسم المادة" : dupCode ? "هذا الكود مستخدم لمادة ثانية" : dupName ? "فيه مادة بنفس الاسم" : negative ? "ما يصير تحط رقم بالسالب" : "";
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -1434,7 +1459,8 @@ function MaterialEditor({ material, onSave, onClose }) {
         </div>
         <div className="modal-foot">
           <button className="btn-ghost" onClick={onClose}>إلغاء</button>
-          <button className="btn-primary" disabled={!m.name.trim()} onClick={() => onSave({ ...m, name: m.name.trim() })}>حفظ</button>
+          {problem && m.name.trim() !== "" && <span className="form-problem">{problem}</span>}
+          <button className="btn-primary" disabled={!!problem} onClick={() => onSave({ ...m, name: m.name.trim(), code: (m.code || "").trim() })}>حفظ</button>
         </div>
       </div>
     </div>
@@ -1745,6 +1771,20 @@ function ProductsTab({ data, persist, currentUser }) {
     setEditing(null);
   }
   function remove(id) {
+    const prod = data.products.find((p) => p.id === id);
+    const usedIn = [];
+    if (data.invoices.some((i) => (i.items || []).some((it) => it.productId === id))) usedIn.push("فواتير بيع");
+    if (data.batches.some((b) => b.productId === id)) usedIn.push("دفعات إنتاج");
+    if (data.marketing.some((m) => m.productId === id)) usedIn.push("سامبلات/تسويق");
+    if (data.losses.some((l) => l.productId === id)) usedIn.push("خسائر");
+    if (usedIn.length) {
+      setConfirmState({
+        info: true,
+        message: `ما تقدر تحذف «${prod?.name || ""}» لأنه مسجّل في: ${usedIn.join("، ")}. حذفه بيخرّب التقارير والمخزون. تقدر تعدّله بدل الحذف.`,
+        onConfirm: () => {},
+      });
+      return;
+    }
     setConfirmState({
       message: "تأكيد حذف المنتج؟",
       onConfirm: () => persist({ ...data, products: data.products.filter((p) => p.id !== id) }),
@@ -1854,18 +1894,30 @@ function ProductsTab({ data, persist, currentUser }) {
         </div>
       )}
 
-      {editing && <ProductEditor product={editing} materials={data.materials} onSave={save} onClose={() => setEditing(null)} />}
+      {editing && <ProductEditor product={editing} others={data.products} materials={data.materials} onSave={save} onClose={() => setEditing(null)} />}
       <ConfirmModal state={confirmState} onCancel={() => setConfirmState(null)} />
     </div>
   );
 }
 
-function ProductEditor({ product, materials, onSave, onClose }) {
+function ProductEditor({ product, materials, others = [], onSave, onClose }) {
   const [p, setP] = useState(product);
   const est = productLiveEstimate(p, materials);
   const price = Number(p.sellingPrice) || 0;
   const margin = price > 0 ? ((price - est.perUnit) / price) * 100 : null;
 
+  const pcode = (p.code || "").trim().toLowerCase();
+  const dupCode = !!pcode && others.some((x) => x.id !== p.id && (x.code || "").trim().toLowerCase() === pcode);
+  const filledLines = (p.recipe || []).filter((l) => l.materialId);
+  const usedMats = filledLines.map((l) => l.materialId);
+  const dupMat = usedMats.length !== new Set(usedMats).size;
+  const badQty = filledLines.some((l) => !(Number(l.qty) > 0));
+  const badYield = !(Number(p.batchYield) > 0);
+  const badPrice = p.sellingPrice !== "" && p.sellingPrice != null && Number(p.sellingPrice) < 0;
+  const problem = !p.name.trim() ? "اكتب اسم المنتج" : dupCode ? "هذا الكود مستخدم لمنتج ثاني"
+    : filledLines.length === 0 ? "أضف مادة وحدة على الأقل للوصفة" : dupMat ? "نفس المادة مكررة بالوصفة"
+    : badQty ? "كل مادة بالوصفة لازم تكون كميتها أكبر من صفر" : badYield ? "عدد القطع الناتجة لازم يكون أكبر من صفر"
+    : badPrice ? "سعر البيع ما يصير بالسالب" : "";
   function set(f, v) { setP({ ...p, [f]: v }); }
   function setLine(id, f, v) { setP({ ...p, recipe: p.recipe.map((l) => (l.id === id ? { ...l, [f]: v } : l)) }); }
   function addLine() { setP({ ...p, recipe: [...p.recipe, { id: uid("rl"), materialId: "", qty: "" }] }); }
@@ -1926,7 +1978,8 @@ function ProductEditor({ product, materials, onSave, onClose }) {
         </div>
         <div className="modal-foot">
           <button className="btn-ghost" onClick={onClose}>إلغاء</button>
-          <button className="btn-primary" disabled={!p.name.trim()} onClick={() => onSave({ ...p, name: p.name.trim() })}>حفظ المنتج</button>
+          {problem && p.name.trim() !== "" && <span className="form-problem">{problem}</span>}
+          <button className="btn-primary" disabled={!!problem} onClick={() => onSave({ ...p, name: p.name.trim(), code: (p.code || "").trim(), recipe: filledLines })}>حفظ المنتج</button>
         </div>
       </div>
     </div>
@@ -2131,6 +2184,7 @@ function InvoicesTab({ data, persist, currentUser }) {
   const [confirmState, setConfirmState] = useState(null);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  const [q, setQ] = useState("");
   const methods = data.settings.paymentMethods || [];
 
   function startNew() { setEditing(emptyInvoice(data.nextInvoiceNo, methods[0])); }
@@ -2168,7 +2222,9 @@ function InvoicesTab({ data, persist, currentUser }) {
   }
   function invoiceTotal(inv) { return invoiceComputed(inv).grandTotal; }
 
-  const filtered = data.invoices.filter((inv) => (!dateFrom || inv.date >= dateFrom) && (!dateTo || inv.date <= dateTo));
+  const qn = q.trim().toLowerCase();
+  const filtered = data.invoices.filter((inv) => (!dateFrom || inv.date >= dateFrom) && (!dateTo || inv.date <= dateTo)
+    && (!qn || String(inv.number).includes(qn) || (inv.customerName || "").toLowerCase().includes(qn) || (inv.customerPhone || "").includes(qn)));
   const isFiltering = dateFrom || dateTo;
   const periodTotal = filtered.reduce((s, inv) => s + invoiceTotal(inv), 0);
   const byMethod = {};
@@ -2188,13 +2244,14 @@ function InvoicesTab({ data, persist, currentUser }) {
 
       {data.invoices.length > 0 && (
         <div className="panel">
-          <div className="panel-head"><h3>فلترة حسب التاريخ (للتسوية البنكية)</h3></div>
+          <div className="panel-head"><h3>بحث وفلترة</h3><span className="panel-sub">التاريخ يفيد في التسوية البنكية</span></div>
           <div className="form-row">
+            <Field label="بحث (اسم العميل / رقم الفاتورة / الهاتف)"><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ابحث..." /></Field>
             <Field label="من تاريخ"><input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} /></Field>
             <Field label="إلى تاريخ"><input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></Field>
-            {isFiltering && (
+            {(isFiltering || qn) && (
               <div style={{ display: "flex", alignItems: "flex-end" }}>
-                <button className="btn-ghost" onClick={() => { setDateFrom(""); setDateTo(""); }}>مسح الفلتر</button>
+                <button className="btn-ghost" onClick={() => { setDateFrom(""); setDateTo(""); setQ(""); }}>مسح الفلتر</button>
               </div>
             )}
           </div>
@@ -2330,7 +2387,27 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
     return issues;
   }, [inv.items, data, inv.id]);
   const hasStockIssue = Object.keys(stockIssues).length > 0;
-  const canSave = inv.items.some((it) => it.productId) && !hasStockIssue;
+  const chosenItems = inv.items.filter((it) => it.productId);
+  const badItemQty = chosenItems.some((it) => !(Number(it.qty) > 0));
+  const badItemPrice = chosenItems.some((it) => it.unitPrice !== "" && it.unitPrice != null && Number(it.unitPrice) < 0);
+  const emptyPriceItem = chosenItems.some((it) => !it.free && (it.unitPrice === "" || it.unitPrice == null));
+  const ovNeed = {};
+  (inv.overheadUsage || []).forEach((u) => { if (u.materialId) ovNeed[u.materialId] = (ovNeed[u.materialId] || 0) + (Number(u.qty) || 0); });
+  const prevUsage = (data.invoices.find((x) => x.id === inv.id)?.overheadUsage) || [];
+  const ovShort = Object.keys(ovNeed).map((id) => {
+    const mat = data.materials.find((m) => m.id === id);
+    const back = prevUsage.filter((u) => u.materialId === id).reduce((a, u) => a + (Number(u.qty) || 0), 0);
+    const have = (Number(mat?.stock) || 0) + back;
+    return mat && ovNeed[id] > have + 1e-9 ? mat.name : null;
+  }).filter(Boolean);
+  const problem = chosenItems.length === 0 ? "اختر منتج واحد على الأقل"
+    : !inv.date ? "حدد تاريخ الفاتورة"
+    : badItemQty ? "الكمية لازم تكون أكبر من صفر"
+    : badItemPrice ? "السعر ما يصير بالسالب"
+    : emptyPriceItem ? "حدد سعر لكل منتج (أو علّمه هدية)"
+    : ovShort.length ? `مخزون غير كافي لمواد: ${ovShort.join("، ")}`
+    : hasStockIssue ? "الكمية المطلوبة أكبر من المتاح بالمخزون" : "";
+  const canSave = !problem;
 
   const customers = useMemo(() => customerStats(allInvoices.filter((i) => i.id !== inv.id)), [allInvoices, inv.id]);
   const matched = customers.find((c) => c.name.toLowerCase() === (inv.customerName || "").trim().toLowerCase());
@@ -2461,7 +2538,8 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
         </div>
         <div className="modal-foot">
           <button className="btn-ghost" onClick={onClose}>إلغاء</button>
-          <button className="btn-primary" disabled={!canSave} onClick={() => onSave(inv)}>حفظ الفاتورة</button>
+          {problem && chosenItems.length > 0 && <span className="form-problem">{problem}</span>}
+          <button className="btn-primary" disabled={!canSave} onClick={() => onSave({ ...inv, items: chosenItems })}>حفظ الفاتورة</button>
         </div>
       </div>
     </div>
@@ -3611,8 +3689,10 @@ function SettingsTab({ data, persist, currentUser }) {
 function Style() {
   return (
     <style>{`
-      @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap');
       * { box-sizing: border-box; }
+      html, body { margin:0; padding:0; background:#F6F2EA; -webkit-text-size-adjust:100%; }
+      button { font-family:'Cairo',sans-serif; }
+      :focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
       :root{
         --bg:#F6F2EA; --surface:#FFFFFF; --surface-2:#FBF8F2; --border:#E3DCCB;
         --ink:#22302B; --ink-soft:#6B7770; --teal:#0E6E5B; --teal-dark:#0A4F42;
@@ -3623,19 +3703,20 @@ function Style() {
       .spin{ animation: spin 1s linear infinite; color:var(--teal); }
       @keyframes spin{ to{ transform:rotate(360deg); } }
 
-      .sidebar{ width:230px; flex-shrink:0; background:#14231F; color:#E7E2D3; display:flex; flex-direction:column; padding:20px 16px; gap:22px; }
+      .sidebar{ width:230px; flex-shrink:0; background:#14231F; color:#E7E2D3; display:flex; flex-direction:column; padding:20px 16px; gap:22px; position:sticky; top:0; align-self:flex-start; height:100vh; overflow-y:auto; }
       .brand{ display:flex; align-items:center; gap:10px; }
       .brand-mark{ width:34px; height:34px; border-radius:9px; background:var(--teal); display:flex; align-items:center; justify-content:center; font-weight:800; color:#fff; font-size:16px; }
       .brand-title{ font-weight:700; font-size:14px; }
       .brand-sub{ font-size:11px; color:#9CA89F; }
       .nav{ display:flex; flex-direction:column; gap:4px; overflow-y:auto; }
-      .nav-item{ display:flex; align-items:center; gap:10px; padding:9px 10px; border-radius:8px; background:transparent; border:none; color:#C9D0C6; font-family:'Cairo'; font-size:13px; cursor:pointer; text-align:right; transition:background .15s; }
+      .nav-item{ white-space:nowrap; flex-shrink:0; display:flex; align-items:center; gap:10px; padding:9px 10px; border-radius:8px; background:transparent; border:none; color:#C9D0C6; font-family:'Cairo'; font-size:13px; cursor:pointer; text-align:right; transition:background .15s; }
       .nav-item:hover{ background:rgba(255,255,255,.06); }
       .nav-item.active{ background:var(--teal); color:#fff; font-weight:600; }
       .sidebar-foot{ margin-top:auto; display:flex; align-items:flex-start; gap:6px; font-size:10.5px; color:#7D8A80; line-height:1.5; padding-top:12px; border-top:1px dashed #2C3B36; }
-      .sidebar-user{ margin-top:auto; display:flex; align-items:center; justify-content:space-between; gap:8px; padding-top:12px; border-top:1px solid #2C3B36; }
+      .sidebar-user{ margin-top:auto; display:flex; flex-direction:column; align-items:stretch; gap:6px; padding-top:12px; border-top:1px solid #2C3B36; }
+      .sidebar-user .logout-btn{ margin:0 !important; padding:6px 9px; text-align:center; }
       .sidebar-user-name{ font-size:12.5px; font-weight:700; color:#E7E2D3; }
-      .logout-btn{ background:none; border:1px solid #3A4A44; color:#B8C2BC; font-family:'Cairo'; font-size:10.5px; border-radius:7px; padding:4px 9px; cursor:pointer; }
+      .logout-btn{ background:none; border:1px solid #3A4A44; color:#B8C2BC; font-family:'Cairo'; font-size:11.5px; white-space:nowrap; border-radius:7px; padding:4px 9px; cursor:pointer; }
       .logout-btn:hover{ background:rgba(255,255,255,.06); }
 
       .login-screen{ min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--bg); font-family:'Cairo',sans-serif; padding:20px; }
@@ -3718,7 +3799,12 @@ function Style() {
 
       .field{ display:flex; flex-direction:column; gap:5px; flex:1; min-width:130px; }
       .field-label{ font-size:11.5px; color:var(--ink-soft); font-weight:600; }
-      .field-hint{ font-size:10px; color:#A3ADA0; }
+      .field-hint{ font-size:11px; color:#7D8A80; line-height:1.5; }
+      .form-problem{ margin-inline-end:auto; align-self:center; color:var(--danger); font-size:12px; font-weight:600; }
+      .grid-2{ display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px; }
+      .panel form > .field, .panel > .field, .modal-body > .field{ margin-bottom:12px; }
+      .ticket-main{ min-width:0; flex:1; }
+      .page-head > div:last-child:not(:first-child){ max-width:100%; }
       input, select, textarea{ font-family:'Cairo'; font-size:13px; padding:8px 10px; border:1px solid var(--border); border-radius:8px; background:var(--surface-2); color:var(--ink); width:100%; }
       input:focus, select:focus, textarea:focus{ outline:2px solid var(--teal); outline-offset:0; background:#fff; }
       .form-row{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
@@ -3795,10 +3881,34 @@ function Style() {
 
       @media (max-width:820px){
         .app-shell{ flex-direction:column; }
-        .sidebar{ width:100%; flex-direction:row; align-items:center; padding:12px 16px; gap:14px; }
-        .nav{ flex-direction:row; overflow-x:auto; }
+        .sidebar{ position:sticky; top:0; z-index:40; height:auto; width:100%; flex-direction:row; flex-wrap:wrap; align-items:center; padding:10px 12px 0; gap:8px 10px; overflow:visible; }
+        .brand{ flex:1; min-width:0; }
+        .sidebar-user{ order:2; margin:0; padding:0; border:0; flex-direction:row; align-items:center; gap:6px; }
+        .sidebar-user-name{ display:none; }
+        .sidebar-user .logout-btn{ padding:5px 8px; font-size:11px; }
+        .nav{ order:3; width:100%; flex-direction:row; overflow-x:auto; gap:4px; padding:4px 0 10px; scrollbar-width:none; }
+        .nav::-webkit-scrollbar{ display:none; }
+        .nav-item{ padding:7px 12px; }
         .sidebar-foot{ display:none; }
-        .content{ padding:18px; }
+        .content{ padding:16px 14px 40px; }
+        .page-head h2{ font-size:19px; }
+        .kpi-row{ grid-template-columns:repeat(2,1fr); gap:10px; }
+        .kpi-card{ padding:12px; }
+        .kpi-row > :last-child:nth-child(odd){ grid-column:1 / -1; }
+        .kpi-value{ font-size:16px; }
+        .panel{ padding:14px; }
+        .grid-2{ grid-template-columns:1fr; }
+        .ticket{ flex-direction:column; }
+        .ticket::before, .ticket::after{ display:none; }
+        .ticket-side{ flex-direction:row; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+        .page-head > div:last-child:not(:first-child){ width:100%; }
+        .page-head .btn-primary, .page-head .btn-ghost{ flex:1; justify-content:center; }
+        .modal-overlay{ padding:0; align-items:flex-end; }
+        .modal{ max-width:100% !important; max-height:94vh; border-radius:16px 16px 0 0; }
+        .modal-foot{ flex-wrap:wrap; }
+        .modal-foot .form-problem{ flex-basis:100%; }
+        input, select, textarea{ font-size:16px; }
+        .form-row > *{ min-width:100% !important; }
         .material-row{ grid-template-columns:1fr 100px 30px; }
         .purchase-line-row, .purchase-extra-row, .purchase-line-extra, .overhead-usage-row{ grid-template-columns:1fr; }
         .invoice-item-row{ grid-template-columns:1fr; }
