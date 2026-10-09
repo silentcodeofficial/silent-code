@@ -2654,6 +2654,14 @@ function offerStatus(o, now) {
   return { label: "شغّال الآن", cls: "green" };
 }
 
+function codeStatus(c, now) {
+  if (!c.active) return { label: "موقوف", cls: "" };
+  if (c.starts_at && new Date(c.starts_at) > now) return { label: "مجدول", cls: "blue" };
+  if (c.expires_at && new Date(c.expires_at) <= now) return { label: "منتهي", cls: "" };
+  if (c.max_uses != null && (c.used_count || 0) >= c.max_uses) return { label: "اكتمل العدد", cls: "" };
+  return { label: "شغّال", cls: "green" };
+}
+
 function addDaysDate(days) {
   const d = new Date(Date.now() + days * 86400000);
   return d.toLocaleDateString("en-CA", { timeZone: "Asia/Muscat" });
@@ -2662,10 +2670,11 @@ function addDaysDate(days) {
 function OffersTab() {
   const [state, setState] = useState({ loading: true, error: "", offers: [], codes: [], products: [], now: new Date() });
   const [busy, setBusy] = useState(false);
-  const blank = { name: "", percent: "", scope: "all", productIds: [], startDate: "", endDate: "", maxOrders: "" };
+  const blank = { name: "", percent: "", scope: "all", productIds: [], mode: "permanent", startDate: "", endDate: "", maxOrders: "" };
   const [form, setForm] = useState(blank);
   const [formError, setFormError] = useState("");
-  const [codeForm, setCodeForm] = useState({ code: "", kind: "percent", value: "", maxUses: "", expires: "" });
+  const blankCode = { code: "", kind: "percent", value: "", usage: "unlimited", maxUses: "", validity: "none", startDate: "", expires: "" };
+  const [codeForm, setCodeForm] = useState(blankCode);
   const [codeError, setCodeError] = useState("");
   const [confirmState, setConfirmState] = useState(null);
 
@@ -2689,8 +2698,9 @@ function OffersTab() {
     if (!form.name.trim()) return setFormError("اكتب اسم للعرض (مثلًا: عرض الافتتاح).");
     if (!(pct > 0 && pct < 100)) return setFormError("نسبة الخصم لازم تكون بين 1 و 99.");
     if (form.scope === "products" && form.productIds.length === 0) return setFormError("اختر عطر واحد على الأقل.");
-    if (form.maxOrders !== "" && !(Number.isInteger(Number(form.maxOrders)) && Number(form.maxOrders) >= 1)) return setFormError("عدد الطلبات لازم يكون رقم صحيح.");
-    if (form.startDate && form.endDate && form.endDate < form.startDate) return setFormError("تاريخ النهاية قبل تاريخ البداية.");
+    if (form.mode === "orders" && !(Number.isInteger(Number(form.maxOrders)) && Number(form.maxOrders) >= 1)) return setFormError("اكتب عدد الطلبات (رقم صحيح من 1 فأكثر).");
+    if (form.mode === "dates" && !form.startDate && !form.endDate) return setFormError("اختر تاريخ نهاية العرض (أو البداية).");
+    if (form.mode === "dates" && form.startDate && form.endDate && form.endDate < form.startDate) return setFormError("تاريخ النهاية قبل تاريخ البداية.");
     setBusy(true);
     try {
       await saveOffer({
@@ -2698,9 +2708,9 @@ function OffersTab() {
         percent_off: pct,
         applies_to: form.scope,
         product_ids: form.scope === "products" ? form.productIds : [],
-        starts_at: form.startDate ? `${form.startDate}T00:00:00+04:00` : null,
-        ends_at: form.endDate ? `${form.endDate}T23:59:59+04:00` : null,
-        max_orders: form.maxOrders === "" ? null : Number(form.maxOrders),
+        starts_at: form.mode === "dates" && form.startDate ? `${form.startDate}T00:00:00+04:00` : null,
+        ends_at: form.mode === "dates" && form.endDate ? `${form.endDate}T23:59:59+04:00` : null,
+        max_orders: form.mode === "orders" ? Number(form.maxOrders) : null,
         active: true,
       });
       setForm(blank);
@@ -2729,17 +2739,30 @@ function OffersTab() {
     setCodeError("");
     const v = Number(codeForm.value);
     if (!(v > 0)) return setCodeError("اكتب قيمة الخصم.");
+    if (codeForm.kind === "percent" && v >= 100) return setCodeError("نسبة الخصم لازم تكون أقل من 100.");
+    let maxUses = null;
+    if (codeForm.usage === "once") maxUses = 1;
+    else if (codeForm.usage === "twice") maxUses = 2;
+    else if (codeForm.usage === "custom") {
+      maxUses = Number(codeForm.maxUses);
+      if (!(Number.isInteger(maxUses) && maxUses >= 1)) return setCodeError("اكتب عدد الاستخدامات (رقم صحيح من 1 فأكثر).");
+    }
+    if (codeForm.validity === "range") {
+      if (!codeForm.startDate && !codeForm.expires) return setCodeError("اختر تاريخ بداية أو نهاية للكود.");
+      if (codeForm.startDate && codeForm.expires && codeForm.expires < codeForm.startDate) return setCodeError("تاريخ النهاية قبل تاريخ البداية.");
+    }
     setBusy(true);
     try {
       await saveCode({
         code: codeForm.code,
         percent_off: codeForm.kind === "percent" ? v : null,
         amount_off: codeForm.kind === "amount" ? v : null,
-        max_uses: codeForm.maxUses === "" ? null : Number(codeForm.maxUses),
-        expires_at: codeForm.expires ? `${codeForm.expires}T23:59:59+04:00` : null,
+        max_uses: maxUses,
+        starts_at: codeForm.validity === "range" && codeForm.startDate ? `${codeForm.startDate}T00:00:00+04:00` : null,
+        expires_at: codeForm.validity === "range" && codeForm.expires ? `${codeForm.expires}T23:59:59+04:00` : null,
         active: true,
       });
-      setCodeForm({ code: "", kind: "percent", value: "", maxUses: "", expires: "" });
+      setCodeForm(blankCode);
       await reload();
     } catch (err) {
       setCodeError(err.message === "invalid_code" ? "الكود لازم يكون حروف إنجليزية أو أرقام (3 إلى 30)." : "ما انحفظ الكود: " + (err.message || err));
@@ -2750,7 +2773,7 @@ function OffersTab() {
   async function toggleCode(c) {
     setBusy(true);
     try {
-      await saveCode({ code: c.code, percent_off: c.percent_off, amount_off: c.amount_off, max_uses: c.max_uses, expires_at: c.expires_at, active: !c.active });
+      await saveCode({ code: c.code, percent_off: c.percent_off, amount_off: c.amount_off, max_uses: c.max_uses, starts_at: c.starts_at, expires_at: c.expires_at, active: !c.active });
       await reload();
     } catch (err) { setState((s) => ({ ...s, error: String(err.message || err) })); }
     setBusy(false);
@@ -2814,23 +2837,37 @@ function OffersTab() {
             </div>
           )}
 
-          <div className="grid-2">
-            <Field label="يبدأ (فاضي = الآن)">
-              <input type="date" value={form.startDate} onChange={(e) => setForm({ ...form, startDate: e.target.value })} />
-            </Field>
-            <Field label="ينتهي (فاضي = ما له نهاية)">
-              <input type="date" value={form.endDate} onChange={(e) => setForm({ ...form, endDate: e.target.value })} />
-            </Field>
-          </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "-4px 0 12px" }}>
-            <button type="button" className="btn-ghost" onClick={() => setForm({ ...form, endDate: addDaysDate(7) })}>أسبوع من اليوم</button>
-            <button type="button" className="btn-ghost" onClick={() => setForm({ ...form, endDate: addDaysDate(30) })}>شهر من اليوم</button>
-            <button type="button" className="btn-ghost" onClick={() => setForm({ ...form, endDate: "" })}>بدون نهاية</button>
-          </div>
-
-          <Field label="لأول كم طلب فقط؟ (اتركه فاضي لو العرض لكل العملاء)" hint="مثال: اكتب 10 فيصير الخصم لأول 10 طلبات، وبعدها يختفي تلقائيًا. الحد يُحسب لكل طلب (مو لكل قطعة).">
-            <input type="number" min="1" value={form.maxOrders} onChange={(e) => setForm({ ...form, maxOrders: e.target.value })} placeholder="10" />
+          <Field label="مدة العرض">
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button type="button" className={form.mode === "permanent" ? "btn-primary" : "btn-ghost"} onClick={() => setForm({ ...form, mode: "permanent" })}>دائم (لين أوقفه)</button>
+              <button type="button" className={form.mode === "orders" ? "btn-primary" : "btn-ghost"} onClick={() => setForm({ ...form, mode: "orders" })}>لعدد طلبات محدد</button>
+              <button type="button" className={form.mode === "dates" ? "btn-primary" : "btn-ghost"} onClick={() => setForm({ ...form, mode: "dates" })}>لفترة زمنية</button>
+            </div>
           </Field>
+          {form.mode === "permanent" && (
+            <p style={{ margin: "-4px 0 12px", fontSize: 12, color: "var(--ink-soft)" }}>العرض يضل شغّال بدون نهاية، وتقدر توقفه أو تحذفه بأي وقت من القائمة تحت.</p>
+          )}
+          {form.mode === "orders" && (
+            <Field label="لأول كم طلب؟" hint="مثال: 10 فيصير الخصم لأول 10 طلبات، وبعدها يختفي من الموقع تلقائيًا. الحد يُحسب لكل طلب (مو لكل قطعة).">
+              <input type="number" min="1" value={form.maxOrders} onChange={(e) => setForm({ ...form, maxOrders: e.target.value })} placeholder="10" />
+            </Field>
+          )}
+          {form.mode === "dates" && (
+            <>
+              <div className="grid-2">
+                <Field label="يبدأ (فاضي = الآن)">
+                  <input type="date" value={form.startDate} onChange={(e) => setForm({ ...form, startDate: e.target.value })} />
+                </Field>
+                <Field label="ينتهي">
+                  <input type="date" value={form.endDate} onChange={(e) => setForm({ ...form, endDate: e.target.value })} />
+                </Field>
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "-4px 0 12px" }}>
+                <button type="button" className="btn-ghost" onClick={() => setForm({ ...form, endDate: addDaysDate(7) })}>أسبوع من اليوم</button>
+                <button type="button" className="btn-ghost" onClick={() => setForm({ ...form, endDate: addDaysDate(30) })}>شهر من اليوم</button>
+              </div>
+            </>
+          )}
 
           {formError && <div className="alert-banner" style={{ marginBottom: 10 }}><AlertCircle size={15} /> {formError}</div>}
           <button className="btn-primary" type="submit" disabled={busy}><Plus size={15} /> {busy ? "..." : "تفعيل العرض"}</button>
@@ -2848,7 +2885,11 @@ function OffersTab() {
             {state.offers.map((o) => {
               const st = offerStatus(o, state.now);
               const names = o.applies_to === "all" ? "كل العطور" : (o.product_ids || []).map((id) => productById[String(id)]?.name_ar || productById[String(id)]?.name_en || id).join("، ");
-              const when = `${o.starts_at ? "من " + muscatDate(o.starts_at) : "من البداية"} ${o.ends_at ? "إلى " + muscatDate(o.ends_at) : "بدون نهاية"}`;
+              const when = o.max_orders != null && !o.ends_at && !o.starts_at
+                ? `لأول ${o.max_orders} طلب`
+                : !o.ends_at && !o.starts_at && o.max_orders == null
+                  ? "دائم (بدون نهاية)"
+                  : `${o.starts_at ? "من " + muscatDate(o.starts_at) : "من البداية"} ${o.ends_at ? "إلى " + muscatDate(o.ends_at) : "بدون نهاية"}`;
               return (
                 <div className="mini-list-row" key={o.id} style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                   <span style={{ flex: 1, minWidth: 220 }}>
@@ -2869,7 +2910,7 @@ function OffersTab() {
 
       <div className="panel">
         <div className="panel-head"><h3>أكواد الخصم (يكتبها العميل بصفحة الدفع)</h3></div>
-        <p style={{ margin: "0 0 10px", fontSize: 12, color: "var(--ink-soft)" }}>الكود يتطبّق بعد العروض. الكود يكتبه العميل بحروف إنجليزية.</p>
+        <p style={{ margin: "0 0 10px", fontSize: 12, color: "var(--ink-soft)" }}>لما العميل يكتب كود صحيح، يلغي عرض الموقع على طلبه ويتطبّق الكود فقط على السعر الأصلي (ما يجتمع خصمان). الكود يكتبه العميل بحروف إنجليزية.</p>
         <form onSubmit={createCode}>
           <div className="grid-2">
             <Field label="الكود"><input value={codeForm.code} onChange={(e) => setCodeForm({ ...codeForm, code: e.target.value.toUpperCase() })} placeholder="WELCOME10" dir="ltr" /></Field>
@@ -2880,9 +2921,35 @@ function OffersTab() {
               </select>
             </Field>
             <Field label="القيمة"><input type="number" step="any" value={codeForm.value} onChange={(e) => setCodeForm({ ...codeForm, value: e.target.value })} /></Field>
-            <Field label="أقصى عدد استخدامات (اختياري)"><input type="number" min="1" value={codeForm.maxUses} onChange={(e) => setCodeForm({ ...codeForm, maxUses: e.target.value })} /></Field>
-            <Field label="ينتهي بتاريخ (اختياري)"><input type="date" value={codeForm.expires} onChange={(e) => setCodeForm({ ...codeForm, expires: e.target.value })} /></Field>
           </div>
+          <Field label="كم مرة يُستخدم الكود؟" hint="يُحسب الاستخدام لكل طلب مدفوع. لو العميل فتح صفحة الدفع وتركها، ما يُحسب إلا بعد 30 دقيقة.">
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {[["once", "مرة واحدة"], ["twice", "مرتين"], ["custom", "عدد محدد"], ["unlimited", "بدون حد"]].map(([k, l]) => (
+                <button type="button" key={k} className={codeForm.usage === k ? "btn-primary" : "btn-ghost"} onClick={() => setCodeForm({ ...codeForm, usage: k })}>{l}</button>
+              ))}
+            </div>
+          </Field>
+          {codeForm.usage === "custom" && (
+            <Field label="عدد الاستخدامات"><input type="number" min="1" value={codeForm.maxUses} onChange={(e) => setCodeForm({ ...codeForm, maxUses: e.target.value })} placeholder="5" /></Field>
+          )}
+          <Field label="مدة صلاحية الكود">
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button type="button" className={codeForm.validity === "none" ? "btn-primary" : "btn-ghost"} onClick={() => setCodeForm({ ...codeForm, validity: "none" })}>بدون انتهاء</button>
+              <button type="button" className={codeForm.validity === "range" ? "btn-primary" : "btn-ghost"} onClick={() => setCodeForm({ ...codeForm, validity: "range" })}>لفترة محددة</button>
+            </div>
+          </Field>
+          {codeForm.validity === "range" && (
+            <>
+              <div className="grid-2">
+                <Field label="يبدأ (فاضي = الآن)"><input type="date" value={codeForm.startDate} onChange={(e) => setCodeForm({ ...codeForm, startDate: e.target.value })} /></Field>
+                <Field label="ينتهي"><input type="date" value={codeForm.expires} onChange={(e) => setCodeForm({ ...codeForm, expires: e.target.value })} /></Field>
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "-4px 0 12px" }}>
+                <button type="button" className="btn-ghost" onClick={() => setCodeForm({ ...codeForm, expires: addDaysDate(7) })}>أسبوع من اليوم</button>
+                <button type="button" className="btn-ghost" onClick={() => setCodeForm({ ...codeForm, expires: addDaysDate(30) })}>شهر من اليوم</button>
+              </div>
+            </>
+          )}
           {codeError && <div className="alert-banner" style={{ marginBottom: 10 }}><AlertCircle size={15} /> {codeError}</div>}
           <button className="btn-primary" type="submit" disabled={busy}><Plus size={15} /> إضافة الكود</button>
         </form>
@@ -2893,10 +2960,11 @@ function OffersTab() {
                 <span style={{ flex: 1 }}>
                   <strong dir="ltr">{c.code}</strong> — {c.percent_off != null ? `${Number(c.percent_off)}%` : `${Number(c.amount_off).toFixed(3)} ر.ع`}
                   <div style={{ fontSize: 12, color: "var(--ink-soft)" }}>
-                    استُخدم {c.used_count || 0}{c.max_uses != null ? ` من ${c.max_uses}` : ""}{c.expires_at ? ` · ينتهي ${muscatDate(c.expires_at)}` : ""}
+                    استُخدم {c.used_count || 0}{c.max_uses != null ? ` من ${c.max_uses}` : ""}
+                    {c.starts_at ? ` · يبدأ ${muscatDate(c.starts_at)}` : ""}{c.expires_at ? ` · ينتهي ${muscatDate(c.expires_at)}` : (!c.starts_at ? " · بدون انتهاء" : "")}
                   </div>
                 </span>
-                <span className={`badge ${c.active ? "green" : ""}`}>{c.active ? "شغّال" : "موقوف"}</span>
+                {(() => { const st = codeStatus(c, state.now); return <span className={`badge ${st.cls}`}>{st.label}</span>; })()}
                 <button className="btn-ghost" disabled={busy} onClick={() => toggleCode(c)}>{c.active ? "إيقاف" : "تشغيل"}</button>
                 <button className="btn-ghost" disabled={busy} onClick={() => removeCode(c)}><Trash2 size={14} /></button>
               </div>
