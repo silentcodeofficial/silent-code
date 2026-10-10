@@ -2748,7 +2748,7 @@ function addDaysDate(days) {
 function OffersTab() {
   const [state, setState] = useState({ loading: true, error: "", offers: [], codes: [], products: [], now: new Date() });
   const [busy, setBusy] = useState(false);
-  const blank = { name: "", percent: "", scope: "all", productIds: [], mode: "permanent", startDate: "", endDate: "", maxOrders: "" };
+  const blank = { name: "", nameEn: "", percent: "", scope: "all", productIds: [], mode: "permanent", startDate: "", endDate: "", maxOrders: "" };
   const [form, setForm] = useState(blank);
   const [formError, setFormError] = useState("");
   const blankCode = { code: "", kind: "percent", value: "", usage: "unlimited", maxUses: "", validity: "none", startDate: "", expires: "" };
@@ -2783,6 +2783,7 @@ function OffersTab() {
     try {
       await saveOffer({
         name: form.name.trim(),
+        name_en: form.nameEn.trim(),
         percent_off: pct,
         applies_to: form.scope,
         product_ids: form.scope === "products" ? form.productIds : [],
@@ -2892,6 +2893,9 @@ function OffersTab() {
             <Field label="اسم العرض (يظهر للعميل)">
               <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="عرض الافتتاح" maxLength={80} />
             </Field>
+            <Field label="اسم العرض بالإنجليزي (اختياري)" hint="لو تركته فاضي بيترجم تلقائيًا للإنجليزي">
+              <input value={form.nameEn} onChange={(e) => setForm({ ...form, nameEn: e.target.value })} placeholder="Launch offer" maxLength={80} dir="ltr" />
+            </Field>
             <Field label="نسبة الخصم %">
               <input type="number" min="1" max="99" value={form.percent} onChange={(e) => setForm({ ...form, percent: e.target.value })} placeholder="20" />
             </Field>
@@ -2971,7 +2975,7 @@ function OffersTab() {
               return (
                 <div className="mini-list-row" key={o.id} style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                   <span style={{ flex: 1, minWidth: 220 }}>
-                    <strong>{o.name}</strong> — {Number(o.percent_off)}%
+                    <strong>{o.name}</strong>{o.name_en ? <span style={{ color: "var(--ink-soft)", fontWeight: 400 }} dir="ltr"> ({o.name_en})</span> : null} — {Number(o.percent_off)}%
                     <div style={{ fontSize: 12, color: "var(--ink-soft)" }}>
                       {names} · {when}{o.max_orders != null ? ` · استُخدم ${o.used} من ${o.max_orders} طلب` : o.used ? ` · ${o.used} طلب` : ""}
                     </div>
