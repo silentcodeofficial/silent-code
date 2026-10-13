@@ -70,6 +70,7 @@ export const listOffers = () => callBridge({ action: "offers_list" });
 export const saveOffer = (offer) => callBridge({ action: "offer_save", offer });
 export const deleteOffer = (id) => callBridge({ action: "offer_delete", id });
 export const saveCode = (code) => callBridge({ action: "code_save", code });
+export const marketerReport = (month) => callBridge({ action: "marketer_report", month });
 export const deleteCode = (code) => callBridge({ action: "code_delete", code });
 
 /* ---------------- مطابقة منتج الموقع مع منتج البرنامج ---------------- */
