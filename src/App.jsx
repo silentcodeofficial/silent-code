@@ -11,7 +11,7 @@ import {
 } from "recharts";
 import { loadAppData, saveAppData, defaultAppData, watchAuth, signIn, signOutUser, resetPassword, ensureDailyBackup, listBackupDates, loadBackup } from "./firebase";
 import { uploadToGoogleDrive, deleteFromGoogleDrive } from "./googleDrive";
-import { pullWebOrders, ackWebOrders, pushWebStock, matchWebItems, buildInvoiceFromWebOrder, muscatDate, listOffers, saveOffer, deleteOffer, saveCode, deleteCode, marketerReport, listWebOrders, setWebOrderStatus, FULFILLMENT_STATUSES } from "./webOrders";
+import { pullWebOrders, ackWebOrders, pushWebStock, matchWebItems, matchWebItemsStrict, suggestWebProduct, listWebProducts, buildInvoiceFromWebOrder, muscatDate, listOffers, saveOffer, deleteOffer, saveCode, deleteCode, marketerReport, listWebOrders, setWebOrderStatus, FULFILLMENT_STATUSES } from "./webOrders";
 
 /* ============================== helpers ============================== */
 
@@ -235,6 +235,10 @@ function sampledQty(data, productId) {
 }
 function lostQty(data, productId) {
   return data.losses.filter((l) => l.productId === productId).reduce((s, l) => s + (Number(l.qty) || 0), 0);
+}
+// المنتج "متتبَّع" لما يكون له إنتاج أو تسوية جرد. غير كذا ما نرسل مخزونه للموقع (عشان ما نصفّره بالغلط).
+function isStockTracked(data, productId) {
+  return producedQty(data, productId) !== 0 || adjustedQty(data, productId) !== 0;
 }
 function adjustedQty(data, productId) {
   return (data.stockAdjustments || []).filter((a) => a.productId === productId).reduce((s, a) => s + (Number(a.qty) || 0), 0);
@@ -613,7 +617,7 @@ function customerStats(invoices) {
     const name = (inv.customerName || "").trim();
     if (!name) return;
     const key = name.toLowerCase();
-    const total = (inv.items || []).reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unitPrice) || 0), 0);
+    const total = invoiceComputed(inv).grandTotal; // الصافي بعد خصم السطر والفاتورة (نفس اللي دفعه العميل)
     if (!map.has(key)) map.set(key, { name, phone: inv.customerPhone || "", email: "", country: "", count: 0, total: 0, lastDate: inv.date, invoices: [] });
     const c = map.get(key);
     c.count += 1;
@@ -827,7 +831,7 @@ export default function CostingApp() {
         const prodId = it.productId;
         if (!prodId) return;
         const avail = availableToSell(nextData, prodId);
-        if (avail < 0) {
+        if (avail < 0 && isStockTracked(nextData, prodId)) {
           const p = nextData.products.find((x) => x.id === prodId);
           out.push(`⚠️ مخزون «${p ? p.name : prodId}» صار بالسالب (${avail}) بعد طلب الموقع — سجّل دفعة إنتاج أو راجع الكمية.`);
         }
@@ -849,25 +853,34 @@ export default function CostingApp() {
 
       const auto = [];
       const manual = [];
+      // الاستيراد التلقائي فقط للأصناف المربوطة ربطًا مؤكَّدًا (تبويب «المخزون الجاهز للبيع» ← ربط المنتجات بالموقع، أو أول مطابقة يدوية).
+      // أي صنف غير مربوط يوقف الطلب في «طلبات الموقع» لين تختار له المنتج مرة وحدة، وبعدها يتذكره للأبد.
+      const working = cur;
       fresh.forEach((o) => {
-        const m = matchWebItems(o, cur.products, cur.settings.webProductMap);
+        const m = matchWebItemsStrict(o, working.products, working.settings.webProductMap);
         (m.length > 0 && m.every((x) => x.productId) ? auto : manual).push(o);
       });
 
       let warnings = [];
+      const amountWarnings = [];
       if (auto.length > 0) {
-        let next = cur;
+        let next = working;
         const importedItems = [];
         auto.forEach((o) => {
-          const m = matchWebItems(o, next.products, next.settings.webProductMap);
+          const m = matchWebItemsStrict(o, next.products, next.settings.webProductMap);
           const inv = buildInvoiceFromWebOrder(o, m, next.nextInvoiceNo, uid);
+          const paidOmr = Number(o.total_amount) / 1000;
+          const calcOmr = invoiceComputed(inv).grandTotal;
+          if (Number.isFinite(paidOmr) && Math.abs(paidOmr - calcOmr) >= 0.0005) {
+            amountWarnings.push(`⚠️ فرق بمبلغ طلب الموقع ${o.client_reference_id}: المدفوع ${fmt(paidOmr)} ر.ع مقابل فاتورة البرنامج ${fmt(calcOmr)} ر.ع — راجع الفاتورة.`);
+          }
           next = { ...next, invoices: [...next.invoices, inv], nextInvoiceNo: next.nextInvoiceNo + 1 };
           importedItems.push({ items: inv.items });
         });
         const ok = await persist(next);
         if (ok) {
           ackRefs.push(...auto.map((o) => o.client_reference_id));
-          warnings = stockWarningsFor(next, importedItems);
+          warnings = [...stockWarningsFor(next, importedItems), ...amountWarnings];
         } else {
           manual.push(...auto); // فشل الحفظ: نخليها تظهر بالتبويب ونعيد المحاولة
         }
@@ -916,7 +929,7 @@ export default function CostingApp() {
     if (!cur) return;
     const rev = {};
     Object.entries(cur.settings.webProductMap || {}).forEach(([webId, accId]) => { rev[accId] = webId; });
-    const snap = cur.products.map((p) => ({
+    const snap = cur.products.filter((p) => rev[p.id] && isStockTracked(cur, p.id)).map((p) => ({
       code: p.code || "",
       name_en: p.nameEn || "",
       web_product_id: rev[p.id] || null,
@@ -2640,7 +2653,7 @@ function WebOrderCard({ order, data, onImport }) {
         {order.discount_code ? ` · كود خصم ${order.discount_code}` : ""}
       </p>
       <div className="mini-list">
-        <div className="mini-list-title">اختر المنتج المقابل بالبرنامج لكل صنف (يتذكّره البرنامج للمرات الجاية)</div>
+        <div className="mini-list-title">اختر المنتج المقابل بالبرنامج لكل صنف (الاقتراح معبّى لك لو لقيناه). اختيارك يتحفظ كربط ثابت، وهالمنتج بعدها يستورد تلقائيًا</div>
         {(order.items || []).map((it, idx) => (
           <div className="mini-list-row" key={idx} style={{ gap: 10, alignItems: "center" }}>
             <span style={{ flex: 1 }}>{it.name} {it.code ? `(${it.code})` : ""} × {it.quantity}</span>
@@ -2745,6 +2758,16 @@ function FulfillmentSection({ fulfil, onReload, onChangeStatus }) {
 
 function WebOrdersTab({ data, webState, onSync, onImport, fulfil, onReloadFulfil, onChangeStatus }) {
   const webInvoices = data.invoices.filter((i) => i.source === "website").slice(-15).reverse();
+  // فحص الربط: مبلغ فاتورة البرنامج لازم يساوي اللي دفعه العميل بالموقع، والطلب الملغي ما يبقى محسوب إيراد
+  const checks = [];
+  (fulfil.orders || []).forEach((o) => {
+    const inv = data.invoices.find((i) => i.webOrderRef === o.client_reference_id);
+    if (!inv) return;
+    const paid = Number(o.total_amount) / 1000;
+    const calc = invoiceComputed(inv).grandTotal;
+    if (Number.isFinite(paid) && Math.abs(paid - calc) >= 0.0005) checks.push(`الطلب ${o.client_reference_id} (فاتورة #${inv.number}): المدفوع بالموقع ${fmt(paid)} ر.ع، وفاتورة البرنامج ${fmt(calc)} ر.ع.`);
+    if (o.fulfillment_status === "cancelled") checks.push(`الطلب ${o.client_reference_id} (فاتورة #${inv.number}) ملغي بالموقع لكن فاتورته لسا محسوبة كإيراد ومنخصومة من المخزون. احذف الفاتورة أو عدّلها.`);
+  });
   return (
     <div className="page">
       <PageHead
@@ -2765,6 +2788,12 @@ function WebOrdersTab({ data, webState, onSync, onImport, fulfil, onReloadFulfil
         {webState.stockSyncedAt ? ` · آخر تحديث لمخزون الموقع: ${webState.stockSyncedAt.toLocaleTimeString("ar-OM")}` : ""}
       </p>
 
+      {checks.length > 0 && (
+        <div className="alert-banner" style={{ marginBottom: 12, display: "block" }}>
+          <strong><AlertCircle size={15} /> فحص تطابق الطلبات مع الفواتير</strong>
+          {checks.map((c, i) => <div key={i} style={{ marginTop: 4 }}>{c}</div>)}
+        </div>
+      )}
       <FulfillmentSection fulfil={fulfil} onReload={onReloadFulfil} onChangeStatus={onChangeStatus} />
 
       {webState.pending.length > 0 && webState.pending.map((o) => (
@@ -3316,7 +3345,7 @@ function CustomersTab({ data, persist }) {
                           <div className="mini-list">
                             <div className="mini-list-title">سجل مشتريات {c.name}</div>
                             {[...c.invoices].sort((a, b) => (a.date < b.date ? 1 : -1)).map((inv) => {
-                              const invTotal = (inv.items || []).reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unitPrice) || 0), 0);
+                              const invTotal = invoiceComputed(inv).grandTotal;
                               return (
                                 <div className="mini-list-row" key={inv.id}>
                                   <span>فاتورة #{inv.number} — {inv.date}</span>
@@ -3451,6 +3480,80 @@ function MarketingTab({ data, persist, currentUser }) {
 function emptyLoss() { return { id: uid("loss"), date: todayStr(), productId: "", qty: "", costTotal: "", note: "" }; }
 
 /* ---- المخزون الجاهز للبيع (بعد الإنتاج) — هو الرقم اللي يتربط بالموقع ---- */
+function WebLinkPanel({ data, persist }) {
+  const [web, setWeb] = useState(null);
+  const [err, setErr] = useState("");
+  const [sel, setSel] = useState({});
+  const [saved, setSaved] = useState(false);
+  const map = data.settings.webProductMap || {};
+  const rev = {};
+  Object.entries(map).forEach(([w, a]) => { rev[a] = w; });
+
+  async function load() {
+    setErr("");
+    try {
+      const r = await listWebProducts();
+      const list = r.products || [];
+      setWeb(list);
+      const init = {};
+      data.products.forEach((p) => { init[p.id] = rev[p.id] || ""; });
+      setSel(init);
+    } catch (e) { setErr("تعذر تحميل منتجات الموقع."); }
+  }
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+
+  function useSuggestions() {
+    const next = { ...sel };
+    data.products.forEach((p) => { if (!next[p.id]) next[p.id] = suggestWebProduct(p, web) || ""; });
+    setSel(next);
+  }
+  const used = {};
+  Object.entries(sel).forEach(([a, w]) => { if (w) used[w] = (used[w] || 0) + 1; });
+  const dup = Object.values(used).some((n) => n > 1);
+  async function save() {
+    if (dup) return;
+    const nextMap = {};
+    Object.entries(sel).forEach(([a, w]) => { if (w) nextMap[w] = a; });
+    // نحافظ على روابط منتجات ما تظهر بالقائمة الحالية (مثلاً منتج انحذف من الموقع) — لا؛ نحتفظ بس بالصالحة
+    await persist({ ...data, settings: { ...data.settings, webProductMap: nextMap } });
+    setSaved(true); setTimeout(() => setSaved(false), 2500);
+  }
+  const changed = data.products.some((p) => (sel[p.id] || "") !== (rev[p.id] || ""));
+
+  return (
+    <div className="panel" style={{ marginTop: 14 }}>
+      <div className="panel-head"><h3>ربط المنتجات بالموقع</h3><span className="panel-sub">اربط كل منتج مرة وحدة. بعدها كل طلباته تدخل فواتير تلقائيًا، ومخزونه يتحدّث بالموقع. ما يتم أي ربط بالتخمين.</span></div>
+      {err && <div className="alert-banner" style={{ marginBottom: 10 }}><AlertCircle size={15} /> {err}</div>}
+      {!web && !err && <p style={{ margin: 0, fontSize: 12.5, color: "var(--ink-soft)" }}>جاري تحميل منتجات الموقع...</p>}
+      {web && (
+        <>
+          <div className="mini-list">
+            {data.products.map((p) => {
+              const sug = !sel[p.id] ? suggestWebProduct(p, web) : "";
+              return (
+                <div className="mini-list-row" key={p.id} style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                  <span style={{ flex: 1, minWidth: 140 }}><strong>{p.name}</strong> <span className="row-sub">{p.code}</span></span>
+                  <select value={sel[p.id] || ""} onChange={(e) => setSel({ ...sel, [p.id]: e.target.value })} style={{ minWidth: 200, maxWidth: "100%" }}>
+                    <option value="">— غير مربوط —</option>
+                    {web.map((w) => <option key={w.id} value={w.id}>{w.code ? `${w.code} — ` : ""}{w.name_ar || w.name_en}{w.name_en && w.name_ar ? ` (${w.name_en})` : ""}</option>)}
+                  </select>
+                  {sug && <button className="btn-ghost" onClick={() => setSel({ ...sel, [p.id]: sug })}>اقتراح: {(web.find((w) => w.id === sug) || {}).name_ar || sug}</button>}
+                </div>
+              );
+            })}
+          </div>
+          {dup && <div className="alert-banner" style={{ margin: "10px 0" }}><AlertCircle size={15} /> منتجين بالبرنامج مربوطين بنفس منتج الموقع — غيّر واحد منهم.</div>}
+          <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+            <button className="btn-ghost" onClick={useSuggestions}>املأ الاقتراحات للفاضي</button>
+            <button className="btn-primary" disabled={dup || !changed} onClick={save}>حفظ الربط</button>
+            {saved && <span className="badge green">تم الحفظ ✅</span>}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function FinishedStockTab({ data, persist, currentUser, webState, onPush }) {
   const LOW = 5;
   const [form, setForm] = useState({ productId: "", dir: "add", qty: "", note: "", date: todayStr() });
@@ -3465,8 +3568,9 @@ function FinishedStockTab({ data, persist, currentUser, webState, onPush }) {
     const samples = sampledQty(data, p.id);
     const lost = lostQty(data, p.id);
     const avail = produced + adj - sold - samples - lost;
-    const linked = mapped.has(p.id) || !!p.code || !!p.nameEn;
-    return { p, produced, adj, sold, samples, lost, avail, shown: Math.max(0, Math.floor(avail)), linked };
+    const linked = mapped.has(p.id);
+    const tracked = isStockTracked(data, p.id);
+    return { p, produced, adj, sold, samples, lost, avail, shown: Math.max(0, Math.floor(avail)), linked, tracked };
   });
   const totalAvail = rows.reduce((s, r) => s + Math.max(0, r.avail), 0);
   const lowCount = rows.filter((r) => r.avail <= LOW).length;
@@ -3520,7 +3624,7 @@ function FinishedStockTab({ data, persist, currentUser, webState, onPush }) {
                   <td className="num">{n0(r.samples)}</td>
                   <td className="num">{n0(r.lost)}</td>
                   <td className={`num ${r.avail <= 0 ? "neg" : ""}`}><strong>{n0(r.avail)}</strong>{r.avail > 0 && r.avail <= LOW ? <div><span className="badge amber">قليل</span></div> : r.avail <= 0 ? <div><span className="badge">نفذ</span></div> : null}</td>
-                  <td>{r.linked ? <span className="badge green">يظهر {r.shown}</span> : <span className="badge amber" title="أضف كود المنتج أو اسمه الإنجليزي ليتطابق مع الموقع">غير مربوط</span>}</td>
+                  <td>{!r.tracked ? <span className="badge amber" title="سجّل دفعة إنتاج أو تسوية جرد ليبدأ تتبّع مخزونه وإرساله للموقع">غير متتبَّع — مخزون الموقع كما هو</span> : r.linked ? <span className="badge green">يظهر {r.shown}</span> : <span className="badge amber" title="اربطه من لوحة «ربط المنتجات بالموقع» تحت">غير مربوط</span>}</td>
                 </tr>
               ))}
             </tbody>
@@ -3528,8 +3632,10 @@ function FinishedStockTab({ data, persist, currentUser, webState, onPush }) {
         </div>
       )}
 
+      {data.products.length > 0 && <WebLinkPanel data={data} persist={persist} />}
+
       {data.products.length > 0 && (
-        <div className="panel">
+        <div className="panel" style={{ marginTop: 14 }}>
           <div className="panel-head"><h3>تسوية الجرد</h3><span className="panel-sub">لو عدّيت المخزون فعليًا ولقيت فرق، أو عندك عبوات جاهزة قديمة من قبل البرنامج</span></div>
           <div className="form-row four">
             <Field label="المنتج">
