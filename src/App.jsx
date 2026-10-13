@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Boxes, Factory, Package, Receipt, Megaphone, AlertTriangle,
   Building2, Settings as SettingsIcon, Plus, Trash2, Printer, X, TrendingUp,
   TrendingDown, Loader2, ChevronLeft, Users, PackageX, Sparkles, AlertCircle,
-  ShoppingCart, Wallet, Pencil, Wrench, FileText, Globe, RefreshCw
+  ShoppingCart, Wallet, Pencil, Wrench, FileText, Globe, RefreshCw, PackageCheck
 } from "lucide-react";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -236,8 +236,11 @@ function sampledQty(data, productId) {
 function lostQty(data, productId) {
   return data.losses.filter((l) => l.productId === productId).reduce((s, l) => s + (Number(l.qty) || 0), 0);
 }
+function adjustedQty(data, productId) {
+  return (data.stockAdjustments || []).filter((a) => a.productId === productId).reduce((s, a) => s + (Number(a.qty) || 0), 0);
+}
 function availableToSell(data, productId, excludeInvoiceId) {
-  return producedQty(data, productId) - soldQtyExcludingInvoice(data, productId, excludeInvoiceId) - sampledQty(data, productId) - lostQty(data, productId);
+  return producedQty(data, productId) + adjustedQty(data, productId) - soldQtyExcludingInvoice(data, productId, excludeInvoiceId) - sampledQty(data, productId) - lostQty(data, productId);
 }
 
 function invoiceComputed(inv) {
@@ -931,6 +934,7 @@ export default function CostingApp() {
     }
   }
   pushStockRef.current = pushStockNow;
+  function forcePushStock() { lastStockRef.current = ""; return pushStockNow(); }
 
   // أي تغيير بالبيانات (فاتورة، دفعة إنتاج، سامبل، خسارة...) ← بعد 4 ثواني نحدّث مخزون الموقع
   useEffect(() => {
@@ -1051,6 +1055,7 @@ export default function CostingApp() {
     { id: "purchaseLog", label: "سجل المشتريات", icon: FileText },
     { id: "products", label: "المنتجات والوصفات", icon: Package },
     { id: "production", label: "دفعات الإنتاج", icon: Factory },
+    { id: "finished", label: "المخزون الجاهز للبيع", icon: PackageCheck },
     { id: "invoices", label: "فواتير البيع", icon: Receipt },
     { id: "webOrders", label: "طلبات الموقع", icon: Globe, badge: webState.pending.length + webState.warnings.length + fulfil.orders.filter((o) => (o.fulfillment_status || "new") === "new").length },
     { id: "offers", label: "العروض والخصومات", icon: Sparkles },
@@ -1100,6 +1105,7 @@ export default function CostingApp() {
         {tab === "purchaseLog" && <PurchaseLogTab data={data} />}
         {tab === "products" && <ProductsTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "production" && <ProductionTab data={data} persist={persist} currentUser={currentUser} />}
+        {tab === "finished" && <FinishedStockTab data={data} persist={persist} currentUser={currentUser} webState={webState} onPush={forcePushStock} />}
         {tab === "invoices" && <InvoicesTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "webOrders" && <WebOrdersTab data={data} webState={webState} onSync={syncWebOrders} onImport={importManualWebOrder} fulfil={fulfil} onReloadFulfil={loadFulfillment} onChangeStatus={changeFulfillment} />}
         {tab === "offers" && <OffersTab />}
@@ -2818,7 +2824,7 @@ function OffersTab() {
   const blank = { name: "", nameEn: "", percent: "", scope: "all", productIds: [], mode: "permanent", startDate: "", endDate: "", maxOrders: "" };
   const [form, setForm] = useState(blank);
   const [formError, setFormError] = useState("");
-  const blankCode = { code: "", kind: "percent", value: "", usage: "unlimited", maxUses: "", validity: "none", startDate: "", expires: "", marketer: "", commission: "" };
+  const blankCode = { code: "", kind: "percent", value: "", usage: "unlimited", maxUses: "", validity: "none", startDate: "", expires: "", marketer: "", commissionType: "percent", commission: "" };
   const [codeForm, setCodeForm] = useState(blankCode);
   const [codeError, setCodeError] = useState("");
   const [confirmState, setConfirmState] = useState(null);
@@ -2898,13 +2904,17 @@ function OffersTab() {
       if (codeForm.startDate && codeForm.expires && codeForm.expires < codeForm.startDate) return setCodeError("تاريخ النهاية قبل تاريخ البداية.");
     }
     const commission = codeForm.commission === "" ? null : Number(codeForm.commission);
-    if (commission != null && !(commission >= 0 && commission <= 100)) return setCodeError("نسبة العمولة لازم تكون بين 0 و100.");
+    const isFixed = codeForm.commissionType === "fixed";
+    if (commission != null && !(commission >= 0)) return setCodeError("العمولة لازم تكون رقم موجب.");
+    if (commission != null && !isFixed && commission > 100) return setCodeError("نسبة العمولة لازم تكون بين 0 و100.");
     if (commission != null && !codeForm.marketer.trim()) return setCodeError("اكتب اسم المسوّق عشان تنحسب له العمولة.");
     setBusy(true);
     try {
       await saveCode({
         marketer_name: codeForm.marketer.trim(),
-        commission_percent: codeForm.marketer.trim() ? commission : null,
+        commission_type: isFixed ? "fixed" : "percent",
+        commission_percent: codeForm.marketer.trim() && !isFixed ? commission : null,
+        commission_fixed: codeForm.marketer.trim() && isFixed ? commission : null,
         code: codeForm.code,
         percent_off: codeForm.kind === "percent" ? v : null,
         amount_off: codeForm.kind === "amount" ? v : null,
@@ -2924,7 +2934,7 @@ function OffersTab() {
   async function toggleCode(c) {
     setBusy(true);
     try {
-      await saveCode({ code: c.code, percent_off: c.percent_off, amount_off: c.amount_off, max_uses: c.max_uses, starts_at: c.starts_at, expires_at: c.expires_at, active: !c.active, marketer_name: c.marketer_name || "", commission_percent: c.commission_percent });
+      await saveCode({ code: c.code, percent_off: c.percent_off, amount_off: c.amount_off, max_uses: c.max_uses, starts_at: c.starts_at, expires_at: c.expires_at, active: !c.active, marketer_name: c.marketer_name || "", commission_type: c.commission_type || "percent", commission_percent: c.commission_percent, commission_fixed: c.commission_fixed });
       await reload();
     } catch (err) { setState((s) => ({ ...s, error: String(err.message || err) })); }
     setBusy(false);
@@ -3106,7 +3116,13 @@ function OffersTab() {
           )}
           <div className="grid-2">
             <Field label="اسم المسوّق (اختياري)" hint="لو الكود لشخص يسوّق لك، اكتب اسمه عشان تطلع له إحصائية شهرية في قسم «المسوّقون»."><input value={codeForm.marketer} onChange={(e) => setCodeForm({ ...codeForm, marketer: e.target.value })} placeholder="مثال: سارة" maxLength={80} /></Field>
-            <Field label="عمولة المسوّق % (اختياري)" hint="نسبة من قيمة الطلب بعد الخصم."><input type="number" step="any" min="0" max="100" value={codeForm.commission} onChange={(e) => setCodeForm({ ...codeForm, commission: e.target.value })} placeholder="10" dir="ltr" /></Field>
+            <Field label="نوع عمولة المسوّق" hint={codeForm.commissionType === "fixed" ? "مبلغ ثابت يستلمه عن كل طلب مدفوع بكوده." : "نسبة من قيمة الطلب بعد الخصم."}>
+              <select value={codeForm.commissionType} onChange={(e) => setCodeForm({ ...codeForm, commissionType: e.target.value, commission: "" })}>
+                <option value="percent">نسبة مئوية %</option>
+                <option value="fixed">مبلغ ثابت لكل طلب (ر.ع)</option>
+              </select>
+            </Field>
+            <Field label={codeForm.commissionType === "fixed" ? "مبلغ العمولة لكل طلب (ر.ع) — اختياري" : "نسبة العمولة % — اختياري"}><input type="number" step="any" min="0" max={codeForm.commissionType === "fixed" ? undefined : 100} value={codeForm.commission} onChange={(e) => setCodeForm({ ...codeForm, commission: e.target.value })} placeholder={codeForm.commissionType === "fixed" ? "1.000" : "10"} dir="ltr" /></Field>
           </div>
           {codeError && <div className="alert-banner" style={{ marginBottom: 10 }}><AlertCircle size={15} /> {codeError}</div>}
           <button className="btn-primary" type="submit" disabled={busy}><Plus size={15} /> إضافة الكود</button>
@@ -3116,7 +3132,7 @@ function OffersTab() {
             {state.codes.map((c) => (
               <div className="mini-list-row" key={c.code} style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                 <span style={{ flex: 1 }}>
-                  <strong dir="ltr">{c.code}</strong> — {c.percent_off != null ? `${Number(c.percent_off)}%` : `${Number(c.amount_off).toFixed(3)} ر.ع`}{c.marketer_name ? <span style={{ color: "var(--ink-soft)", fontWeight: 400 }}> · المسوّق: {c.marketer_name}{c.commission_percent != null ? ` (${Number(c.commission_percent)}%)` : ""}</span> : null}
+                  <strong dir="ltr">{c.code}</strong> — {c.percent_off != null ? `${Number(c.percent_off)}%` : `${Number(c.amount_off).toFixed(3)} ر.ع`}{c.marketer_name ? <span style={{ color: "var(--ink-soft)", fontWeight: 400 }}> · المسوّق: {c.marketer_name}{c.commission_type === "fixed" && c.commission_fixed != null ? ` (${Number(c.commission_fixed).toFixed(3)} ر.ع لكل طلب)` : c.commission_percent != null ? ` (${Number(c.commission_percent)}%)` : ""}</span> : null}
                   <div style={{ fontSize: 12, color: "var(--ink-soft)" }}>
                     استُخدم {c.used_count || 0}{c.max_uses != null ? ` من ${c.max_uses}` : ""}
                     {c.starts_at ? ` · يبدأ ${muscatDate(c.starts_at)}` : ""}{c.expires_at ? ` · ينتهي ${muscatDate(c.expires_at)}` : (!c.starts_at ? " · بدون انتهاء" : "")}
@@ -3433,6 +3449,134 @@ function MarketingTab({ data, persist, currentUser }) {
 /* ============================== losses ============================== */
 
 function emptyLoss() { return { id: uid("loss"), date: todayStr(), productId: "", qty: "", costTotal: "", note: "" }; }
+
+/* ---- المخزون الجاهز للبيع (بعد الإنتاج) — هو الرقم اللي يتربط بالموقع ---- */
+function FinishedStockTab({ data, persist, currentUser, webState, onPush }) {
+  const LOW = 5;
+  const [form, setForm] = useState({ productId: "", dir: "add", qty: "", note: "", date: todayStr() });
+  const [err, setErr] = useState("");
+  const [pushing, setPushing] = useState(false);
+  const mapped = new Set(Object.values(data.settings.webProductMap || {}));
+
+  const rows = data.products.map((p) => {
+    const produced = producedQty(data, p.id);
+    const adj = adjustedQty(data, p.id);
+    const sold = soldQtyExcludingInvoice(data, p.id, null);
+    const samples = sampledQty(data, p.id);
+    const lost = lostQty(data, p.id);
+    const avail = produced + adj - sold - samples - lost;
+    const linked = mapped.has(p.id) || !!p.code || !!p.nameEn;
+    return { p, produced, adj, sold, samples, lost, avail, shown: Math.max(0, Math.floor(avail)), linked };
+  });
+  const totalAvail = rows.reduce((s, r) => s + Math.max(0, r.avail), 0);
+  const lowCount = rows.filter((r) => r.avail <= LOW).length;
+
+  function addAdjustment() {
+    setErr("");
+    const q = Number(form.qty);
+    if (!form.productId) return setErr("اختر المنتج.");
+    if (!(q > 0) || !Number.isFinite(q)) return setErr("اكتب كمية أكبر من صفر.");
+    if (!form.note.trim()) return setErr("اكتب سبب التسوية (مثلًا: جرد فعلي، مخزون افتتاحي).");
+    const signed = form.dir === "sub" ? -q : q;
+    const row = rows.find((r) => r.p.id === form.productId);
+    if (row && row.avail + signed < 0) return setErr(`النقص أكبر من المتاح (${row.avail}).`);
+    persist({ ...data, stockAdjustments: [...(data.stockAdjustments || []), { id: uid("adj"), date: form.date, productId: form.productId, qty: signed, note: form.note.trim(), createdBy: currentUser?.name }] });
+    setForm({ productId: "", dir: "add", qty: "", note: "", date: todayStr() });
+  }
+  function removeAdjustment(id) { persist({ ...data, stockAdjustments: (data.stockAdjustments || []).filter((a) => a.id !== id) }); }
+  async function pushNow() { setPushing(true); try { await onPush(); } finally { setPushing(false); } }
+
+  const adjustments = [...(data.stockAdjustments || [])].reverse();
+  const n0 = (v) => String(Math.round(v * 1000) / 1000);
+
+  return (
+    <div className="page">
+      <PageHead
+        eyebrow="التصنيع"
+        title="المخزون الجاهز للبيع"
+        desc="العبوات الجاهزة بعد الإنتاج. هذا الرقم (المتاح) هو اللي يظهر في الموقع: ما فيه عميل يقدر يطلب أكثر منه. يزيد بدفعات الإنتاج، وينقص بالمبيعات (ومنها طلبات الموقع) والسامبلات والخسائر."
+        action={<button className="btn-ghost" onClick={pushNow} disabled={pushing}><RefreshCw size={15} /> تحديث مخزون الموقع الآن</button>}
+      />
+      {webState.stockError && <div className="alert-banner" style={{ marginBottom: 12 }}><AlertCircle size={15} /> {webState.stockError}</div>}
+      <div className="kpi-row">
+        <div className="kpi-card"><PackageCheck size={16} className="kpi-icon" /><div className="kpi-label">إجمالي العبوات المتاحة</div><div className="kpi-value">{n0(totalAvail)} <span className="unit">عبوة</span></div></div>
+        <div className="kpi-card" style={{ "--accent": "var(--danger)" }}><AlertTriangle size={16} className="kpi-icon" /><div className="kpi-label">منتجات قليلة أو منتهية (≤ {LOW})</div><div className="kpi-value">{lowCount}</div></div>
+        <div className="kpi-card"><Globe size={16} className="kpi-icon" /><div className="kpi-label">آخر تحديث لمخزون الموقع</div><div className="kpi-value" style={{ fontSize: 16 }}>{webState.stockSyncedAt ? webState.stockSyncedAt.toLocaleTimeString("ar-OM") : "—"}</div></div>
+      </div>
+
+      {data.products.length === 0 ? (
+        <Empty icon={Package} title="أضف منتج أولاً" sub="لازم يكون فيه منتج مسجل عشان يظهر مخزونه الجاهز." />
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>المنتج</th><th>المنتَج</th><th>تسويات</th><th>المبيعات</th><th>سامبلات</th><th>خسائر</th><th>المتاح للبيع</th><th>الموقع</th></tr></thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.p.id}>
+                  <td><strong>{r.p.name}</strong><div className="row-sub">{r.p.code}</div></td>
+                  <td className="num">{n0(r.produced)}</td>
+                  <td className="num">{r.adj ? (r.adj > 0 ? "+" : "") + n0(r.adj) : "—"}</td>
+                  <td className="num">{n0(r.sold)}</td>
+                  <td className="num">{n0(r.samples)}</td>
+                  <td className="num">{n0(r.lost)}</td>
+                  <td className={`num ${r.avail <= 0 ? "neg" : ""}`}><strong>{n0(r.avail)}</strong>{r.avail > 0 && r.avail <= LOW ? <div><span className="badge amber">قليل</span></div> : r.avail <= 0 ? <div><span className="badge">نفذ</span></div> : null}</td>
+                  <td>{r.linked ? <span className="badge green">يظهر {r.shown}</span> : <span className="badge amber" title="أضف كود المنتج أو اسمه الإنجليزي ليتطابق مع الموقع">غير مربوط</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {data.products.length > 0 && (
+        <div className="panel">
+          <div className="panel-head"><h3>تسوية الجرد</h3><span className="panel-sub">لو عدّيت المخزون فعليًا ولقيت فرق، أو عندك عبوات جاهزة قديمة من قبل البرنامج</span></div>
+          <div className="form-row four">
+            <Field label="المنتج">
+              <select value={form.productId} onChange={(e) => setForm({ ...form, productId: e.target.value })}>
+                <option value="">اختر منتج</option>
+                {data.products.map((p) => <option key={p.id} value={p.id}>{productLabel(p)}</option>)}
+              </select>
+            </Field>
+            <Field label="نوع التسوية">
+              <select value={form.dir} onChange={(e) => setForm({ ...form, dir: e.target.value })}>
+                <option value="add">زيادة (أضف عبوات)</option>
+                <option value="sub">نقص (اخصم عبوات)</option>
+              </select>
+            </Field>
+            <Field label="الكمية"><input type="number" min="1" step="1" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} /></Field>
+            <Field label="التاريخ"><input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
+          </div>
+          <Field label="السبب (إجباري)"><input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} placeholder="مثال: جرد فعلي بالمخزن، مخزون افتتاحي" /></Field>
+          {err && <div className="alert-banner" style={{ marginBottom: 10 }}><AlertCircle size={15} /> {err}</div>}
+          <button className="btn-primary" onClick={addAdjustment}><Plus size={16} /> تسجيل التسوية</button>
+        </div>
+      )}
+
+      {adjustments.length > 0 && (
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>التاريخ</th><th>المنتج</th><th>الكمية</th><th>السبب</th><th>بواسطة</th><th></th></tr></thead>
+            <tbody>
+              {adjustments.map((a) => {
+                const prod = data.products.find((p) => p.id === a.productId);
+                return (
+                  <tr key={a.id}>
+                    <td>{a.date}</td><td>{prod?.name || "—"}</td>
+                    <td className={`num ${a.qty < 0 ? "neg" : ""}`}>{a.qty > 0 ? "+" : ""}{a.qty}</td>
+                    <td>{a.note}</td>
+                    <td>{a.createdBy && <span className="badge green">{a.createdBy}</span>}</td>
+                    <td><button className="icon-btn danger" onClick={() => removeAdjustment(a.id)}><Trash2 size={14} /></button></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function LossesTab({ data, persist, currentUser }) {
   const [form, setForm] = useState(emptyLoss());
