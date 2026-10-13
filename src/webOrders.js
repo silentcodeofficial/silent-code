@@ -70,6 +70,7 @@ export const listOffers = () => callBridge({ action: "offers_list" });
 export const saveOffer = (offer) => callBridge({ action: "offer_save", offer });
 export const deleteOffer = (id) => callBridge({ action: "offer_delete", id });
 export const saveCode = (code) => callBridge({ action: "code_save", code });
+export const listWebProducts = () => callBridge({ action: "web_products" });
 export const marketerReport = (month) => callBridge({ action: "marketer_report", month });
 export const deleteCode = (code) => callBridge({ action: "code_delete", code });
 
@@ -83,26 +84,70 @@ export function normCode(s) {
   return v;
 }
 
+// تطبيع الأسماء للمقارنة: حروف صغيرة، بدون مسافات/تشكيل/علامات، وألف موحّدة
+function normName(s) {
+  return String(s ?? "")
+    .toLowerCase()
+    .replace(/[\u064B-\u0652\u0640]/g, "")
+    .replace(/[أإآ]/g, "ا").replace(/ى/g, "ي").replace(/ة/g, "ه")
+    .replace(/[^a-z0-9\u0600-\u06FF]/g, "");
+}
+
 function findProductForItem(item, products, webProductMap) {
-  // 1) مطابقة محفوظة مسبقًا (اخترتها يدويًا قبل)
+  // 1) ربط محفوظ مسبقًا (تلقائي أو يدوي)
   const mappedId = webProductMap && item.product_id != null ? webProductMap[String(item.product_id)] : null;
   if (mappedId && products.some((p) => p.id === mappedId)) return mappedId;
-  // 2) بالكود
-  const c = normCode(item.code);
-  if (c) {
-    const byCode = products.filter((p) => normCode(p.code) === c);
-    if (byCode.length === 1) return byCode[0].id;
+  // 2) بالكود (نفس الكود تمامًا بعد التطبيع)
+  for (const code of [item.code, item.web_code]) {
+    const c = normCode(code);
+    if (c) {
+      const byCode = products.filter((p) => normCode(p.code) === c);
+      if (byCode.length === 1) return byCode[0].id;
+    }
   }
-  // 3) بالاسم الإنجليزي
-  const n = String(item.name ?? "").trim().toLowerCase();
-  if (n) {
-    const byName = products.filter((p) => String(p.nameEn ?? "").trim().toLowerCase() === n);
+  // 3) بالاسم: إنجليزي أو عربي، مقارنة مطبّعة
+  const webNames = [item.name, item.web_name_en, item.web_name_ar].map(normName).filter(Boolean);
+  if (webNames.length) {
+    const byName = products.filter((p) => [p.nameEn, p.name].map(normName).some((n) => n && webNames.includes(n)));
     if (byName.length === 1) return byName[0].id;
   }
   return null;
 }
 
-// يرجع لكل صنف بالطلب: { item, productId (أو null لو ما لقينا مطابق) }
+// ننشئ منتج في البرنامج من منتج الموقع لما ما نلقى له مقابل (عشان ما تحتاج تطابق يدويًا)
+export function productFromWebItem(item, products, makeId) {
+  const codes = new Set((products || []).map((p) => normCode(p.code)));
+  let code = String(item.web_code ?? item.code ?? "").trim();
+  if (!code || codes.has(normCode(code))) code = `WEB-${String(item.product_id ?? "").slice(0, 6) || Date.now().toString(36)}`;
+  const nameAr = String(item.web_name_ar ?? "").trim();
+  const nameEn = String(item.web_name_en ?? item.name ?? "").trim();
+  const price = item.web_price != null ? Number(item.web_price) : (Number(item.original_unit_amount) || Number(item.unit_amount) || 0) / 1000;
+  return {
+    id: makeId("prod"), code, name: nameAr || nameEn || code, nameEn, category: "عطر", type: "manufactured",
+    sellingPrice: Number.isFinite(price) ? price : 0, batchYield: 1, recipe: [], autoFromWeb: true,
+  };
+}
+
+// ربط مؤكَّد فقط (من جدول الربط المحفوظ) — هذا اللي يسمح بالاستيراد التلقائي
+export function matchWebItemsStrict(order, products, webProductMap) {
+  return (order.items || []).map((item) => {
+    const id = webProductMap && item.product_id != null ? webProductMap[String(item.product_id)] : null;
+    return { item, productId: id && (products || []).some((p) => p.id === id) ? id : null };
+  });
+}
+
+// اقتراح ربط منتج برنامج مع منتج موقع (بالكود أو الاسم) — للعرض فقط، ما ينحفظ إلا بتأكيد المستخدم
+export function suggestWebProduct(prod, webProducts) {
+  const c = normCode(prod.code);
+  if (c) {
+    const hit = (webProducts || []).filter((w) => normCode(w.code) === c);
+    if (hit.length === 1) return hit[0].id;
+  }
+  const names = [prod.nameEn, prod.name].map(normName).filter(Boolean);
+  const hit = (webProducts || []).filter((w) => [w.name_en, w.name_ar].map(normName).some((n) => n && names.includes(n)));
+  return hit.length === 1 ? hit[0].id : "";
+}
+
 export function matchWebItems(order, products, webProductMap) {
   return (order.items || []).map((item) => ({
     item,
