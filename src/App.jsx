@@ -11,7 +11,7 @@ import {
 } from "recharts";
 import { loadAppData, saveAppData, defaultAppData, watchAuth, signIn, signOutUser, resetPassword, ensureDailyBackup, listBackupDates, loadBackup } from "./firebase";
 import { uploadToGoogleDrive, deleteFromGoogleDrive } from "./googleDrive";
-import { pullWebOrders, ackWebOrders, pushWebStock, matchWebItems, buildInvoiceFromWebOrder, muscatDate, listOffers, saveOffer, deleteOffer, saveCode, deleteCode, listWebOrders, setWebOrderStatus, FULFILLMENT_STATUSES } from "./webOrders";
+import { pullWebOrders, ackWebOrders, pushWebStock, matchWebItems, buildInvoiceFromWebOrder, muscatDate, listOffers, saveOffer, deleteOffer, saveCode, deleteCode, marketerReport, listWebOrders, setWebOrderStatus, FULFILLMENT_STATUSES } from "./webOrders";
 
 /* ============================== helpers ============================== */
 
@@ -274,6 +274,9 @@ const PRINT_LABELS = {
     periodTagline: "كشف حساب فترة (للاستخدام الداخلي)", from: "من", to: "إلى",
     invoiceNo: "رقم الفاتورة", customer: "العميل", paymentMethod: "طريقة الدفع", orderRef: "رقم الطلب", paid: "مدفوعة", email: "الإيميل", country: "الدولة",
     byMethod: "التوزيع حسب طريقة الدفع", invoiceCount: "عدد الفواتير",
+    invoiceWord: "فاتورة", dateLabel: "التاريخ", billedTo: "الفاتورة إلى", phone: "الجوال", address: "العنوان", grandTotalPaid: "الإجمالي المدفوع",
+    thanksBrand: "شكرًا لثقتك بـ Silent Code", footNote: "هذه فاتورة إلكترونية ولا تحتاج توقيعًا. الأسعار بالريال العُماني.",
+    legalLine: "أصيل الفخامة ش.م.م · سجل تجاري 1648344 · شناص، سلطنة عُمان",
   },
   en: {
     dir: "ltr", htmlLang: "en", fontFamily: "'Segoe UI',Tahoma,Arial,sans-serif",
@@ -285,6 +288,9 @@ const PRINT_LABELS = {
     periodTagline: "Period Statement (internal use)", from: "From", to: "To",
     invoiceNo: "Invoice No.", customer: "Customer", paymentMethod: "Payment Method", orderRef: "Order", paid: "PAID", email: "Email", country: "Country",
     byMethod: "Breakdown by Payment Method", invoiceCount: "Invoice Count",
+    invoiceWord: "Invoice", dateLabel: "Date", billedTo: "Billed to", phone: "Phone", address: "Address", grandTotalPaid: "Total paid",
+    thanksBrand: "Thank you for choosing Silent Code", footNote: "This is an electronically generated invoice and needs no signature. Prices in Omani Rial.",
+    legalLine: "Pure Luxe LLC · CR 1648344 · Shinas, Sultanate of Oman",
   },
 };
 
@@ -347,7 +353,57 @@ function printStyles(lang) {
 `;
 }
 
-function openPrintWindow(lang, bodyHTML) {
+
+// نفس شكل الفاتورة الصادرة من الموقع (نفس الألوان والترتيب) عشان تكون كل فواتير SILENT CODE موحّدة
+function invoiceStyles(lang) {
+  const L = PRINT_LABELS[lang];
+  const start = lang === "ar" ? "right" : "left";
+  const end = lang === "ar" ? "left" : "right";
+  return `
+  * { box-sizing: border-box; }
+  body { font-family: ${lang === "ar" ? "'Cairo','Segoe UI',Tahoma,Arial,sans-serif" : "'Segoe UI',Helvetica,Arial,sans-serif"}; direction: ${L.dir}; margin: 0; color: #1b1412; background: #fff; }
+  .inv-band { background: #34090e; padding: 26px 28px; text-align: center; }
+  .inv-logo { color: #EAE2D0; font-size: 22px; letter-spacing: .34em; font-weight: 600; font-family: 'Archivo','Segoe UI',Arial,sans-serif; direction: ltr; }
+  .inv-rule { height: 2px; width: 46px; background: #C79B58; margin: 12px auto 0; }
+  .sheet { max-width: 720px; margin: 0 auto; padding: 30px 28px 34px; }
+  table { border-collapse: collapse; width: 100%; }
+  .top { margin-bottom: 22px; }
+  td.top-start { text-align: ${start}; vertical-align: top; }
+  td.top-end { text-align: ${end}; vertical-align: top; }
+  .eyebrow { font-size: 12px; letter-spacing: .14em; color: #C79B58; text-transform: uppercase; }
+  .eyebrow.small { font-size: 12px; margin-bottom: 4px; }
+  .inv-no { font-size: 26px; font-weight: 700; color: #34090e; margin-top: 4px; direction: ltr; text-align: ${start}; }
+  .paid-stamp { display: inline-block; border: 2px solid #34090e; color: #34090e; padding: 4px 14px; font-weight: 700; letter-spacing: .1em; font-size: 13px; }
+  .meta { margin-bottom: 22px; font-size: 14px; color: #5b4f45; }
+  .meta span { color: #1b1412; }
+  .billed { background: #F5F0E4; padding: 14px 16px; margin-bottom: 24px; font-size: 14px; line-height: 1.8; color: #1b1412; text-align: ${start}; }
+  table.items th { padding: 0 0 8px; font-size: 12px; color: #8a7f6d; font-weight: 500; border-bottom: 2px solid #34090e; text-align: ${start}; }
+  table.items td { padding: 12px 0; border-bottom: 1px solid #e3d9c4; font-size: 15px; text-align: ${start}; vertical-align: top; }
+  table.items .c-qty { text-align: center; padding-inline: 8px; }
+  table.items .c-num { text-align: ${end}; white-space: nowrap; }
+  table.items th.c-qty { text-align: center; }
+  table.items th.c-num { text-align: ${end}; }
+  .sub { font-size: 12px; color: #C79B58; margin-top: 2px; }
+  table.sumwrap { margin-top: 16px; }
+  table.sumwrap td.sp { width: 45%; }
+  table.sums td { padding: 6px 0; font-size: 14px; color: #5b4f45; text-align: ${start}; }
+  table.sums td.c-num { text-align: ${end}; color: #1b1412; white-space: nowrap; }
+  table.sums tr.sum-strong td { font-size: 17px; font-weight: 700; color: #34090e; }
+  table.sums tr.sum-strong td.c-num { font-size: 19px; color: #34090e; }
+  td.sum-rule { border-top: 2px solid #34090e; height: 6px; padding: 0; }
+  .pay { margin-top: 18px; font-size: 12px; color: #8a7f6d; text-align: ${start}; }
+  .note { margin-top: 14px; font-size: 13px; color: #444; background: #F5F0E4; padding: 10px 12px; text-align: ${start}; }
+  .foot { margin-top: 34px; text-align: center; border-top: 1px solid #efe7d6; padding-top: 16px; }
+  .foot-thanks { font-size: 14px; font-weight: 700; color: #34090e; margin-bottom: 4px; }
+  .foot-note { font-size: 12px; color: #8a7f6d; line-height: 1.7; }
+  .foot-site { font-size: 12px; color: #34090e; margin-top: 8px; letter-spacing: .08em; direction: ltr; }
+  .foot-legal { font-size: 11px; color: #8a7f6d; margin-top: 6px; }
+  bdi { unicode-bidi: isolate; }
+  @media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } table.items tr { page-break-inside: avoid; } }
+`;
+}
+
+function openPrintWindow(lang, bodyHTML, styles) {
   const win = window.open("", "_blank", "width=850,height=1000");
   if (!win) {
     alert("المتصفح منع فتح نافذة الطباعة. فعّل النوافذ المنبثقة (Popups) لهذا الموقع وحاول مرة ثانية. / Popup blocked — please allow popups for this site.");
@@ -355,7 +411,7 @@ function openPrintWindow(lang, bodyHTML) {
   }
   const L = PRINT_LABELS[lang];
   win.document.open();
-  win.document.write(`<!doctype html><html dir="${L.dir}" lang="${L.htmlLang}"><head><meta charset="utf-8" /><title>${L.docTitle}</title><style>${printStyles(lang)}</style></head><body>${bodyHTML}</body></html>`);
+  win.document.write(`<!doctype html><html dir="${L.dir}" lang="${L.htmlLang}"><head><meta charset="utf-8" /><title>${L.docTitle}</title><style>${styles || printStyles(lang)}</style></head><body>${bodyHTML}</body></html>`);
   win.document.close();
   win.onload = () => { win.focus(); win.print(); };
   setTimeout(() => { try { win.focus(); win.print(); } catch (e) {} }, 400);
@@ -390,63 +446,72 @@ function printInvoiceNow(invoice, data, lang = "ar") {
     ? `${L.deliveryType}${invoice.deliveryAddress ? `<div class="row">${escHtml(invoice.deliveryAddress)}</div>` : ""}`
     : L.pickup;
 
+  const OX = "#34090e", BRASS = "#C79B58", INK = "#1b1412";
+  const alignStart = lang === "ar" ? "right" : "left";
+  const alignEnd = lang === "ar" ? "left" : "right";
+  const isWeb = invoice.source === "website";
+  const itemRows = computed.items
+    .filter((it) => it.productId)
+    .map((it) => {
+      const prod = data.products.find((p) => p.id === it.productId);
+      const name = lang === "en" ? (prod?.nameEn || prod?.name || "—") : (prod?.name || "—");
+      return `<tr>
+        <td class="c-item">${escHtml(name)}${it.free ? ` ${L.gift}` : ""}${it.lineDiscount ? `<div class="sub">${L.discount}: −${fmt(it.lineDiscount)} ${L.currency}</div>` : ""}</td>
+        <td class="c-qty"><bdi>${it.qty}</bdi></td>
+        <td class="c-num"><bdi>${fmt(it.price)}</bdi></td>
+        <td class="c-num"><bdi>${fmt(it.afterLineDiscount)}</bdi></td>
+      </tr>`;
+    })
+    .join("");
+  const pay = invoice.paymentMethod ? escHtml(lang === "en" ? (PRINT_METHOD_EN[invoice.paymentMethod] || invoice.paymentMethod) : invoice.paymentMethod) : "";
+  const addressLine = invoice.deliveryType === "delivery"
+    ? (invoice.deliveryAddress ? escHtml(invoice.deliveryAddress) : L.deliveryType)
+    : L.pickup;
+  const sumRow = (label, val, strong) => `<tr class="${strong ? "sum-strong" : "sum"}"><td>${label}</td><td class="c-num"><bdi>${val}</bdi></td></tr>`;
   const html = `
-    <div class="accent-bar"></div>
+    <div class="inv-band"><div class="inv-logo">SILENT CODE</div><div class="inv-rule"></div></div>
     <div class="sheet">
-      <div class="print-head">
-        <div class="head-col head-brand">
-          <div class="print-brand">SILENT CODE</div>
-          <div class="print-tagline">${L.tagline}</div>
-          ${bizLines ? `<div class="biz-info">${bizLines}</div>` : ""}
-        </div>
-        <div class="head-col head-meta">
-          <div class="doc-title">${L.docTitle}</div>
-          <div class="invoice-badge"><bdi>${escHtml(invoice.webInvoiceNumber || "#" + invoice.number)}</bdi></div>
-          <div class="print-meta-line">
-            <div><bdi>${escHtml(invoice.date)}</bdi></div>
-            ${invoice.webOrderRef ? `<div>${L.orderRef}: <bdi>${escHtml(invoice.webOrderRef)}</bdi></div>` : ""}
-            ${invoice.paymentMethod ? `<div>${escHtml(lang === "en" ? (PRINT_METHOD_EN[invoice.paymentMethod] || invoice.paymentMethod) : invoice.paymentMethod)}</div>` : ""}
-          </div>
-          ${invoice.source === "website" ? `<div class="stamp">${L.paid}</div>` : ""}
-        </div>
+      <table class="top"><tr>
+        <td class="top-start">
+          <div class="eyebrow">${L.invoiceWord}</div>
+          <div class="inv-no"><bdi>${escHtml(invoice.webInvoiceNumber || "#" + invoice.number)}</bdi></div>
+        </td>
+        <td class="top-end">${isWeb ? `<span class="paid-stamp">${L.paid}</span>` : ""}</td>
+      </tr></table>
+      <table class="meta"><tr>
+        <td class="top-start">${L.dateLabel}: <span><bdi>${escHtml(invoice.date)}</bdi></span></td>
+        <td class="top-end">${invoice.webOrderRef ? `${L.orderRef}: <span><bdi>${escHtml(invoice.webOrderRef)}</bdi></span>` : ""}</td>
+      </tr></table>
+      <div class="billed">
+        <div class="eyebrow small">${L.billedTo}</div>
+        <b>${escHtml(invoice.customerName || "—")}</b><br>
+        ${invoice.customerPhone ? `${L.phone}: <bdi>${escHtml(invoice.customerPhone)}</bdi><br>` : ""}
+        ${invoice.customerEmail ? `<bdi>${escHtml(invoice.customerEmail)}</bdi><br>` : ""}
+        ${L.address}: ${addressLine}${invoice.deliveryType === "delivery" && invoice.customerCountry ? ` — ${escHtml(PRINT_COUNTRIES[invoice.customerCountry]?.[lang] || invoice.customerCountry)}` : ""}
       </div>
-
-      <div class="info-grid">
-        <div class="info-box first">
-          <div class="info-box-title">${L.customerInfo}</div>
-          <div class="row"><b>${escHtml(invoice.customerName || "—")}</b></div>
-          ${invoice.customerPhone ? `<div class="row"><bdi>${escHtml(invoice.customerPhone)}</bdi></div>` : ""}
-          ${invoice.customerEmail ? `<div class="row"><bdi>${escHtml(invoice.customerEmail)}</bdi></div>` : ""}
-          ${invoice.customerCountry ? `<div class="row">${escHtml(PRINT_COUNTRIES[invoice.customerCountry]?.[lang] || invoice.customerCountry)}</div>` : ""}
-        </div>
-        <div class="info-box second">
-          <div class="info-box-title">${L.delivery}</div>
-          <div class="row">${deliveryLine}</div>
-        </div>
-      </div>
-
       <table class="items">
-        <thead><tr><th>${L.item}</th><th>${L.qty}</th><th>${L.unitPrice}</th><th>${L.discount}</th><th>${L.total}</th></tr></thead>
-        <tbody>${rows}</tbody>
+        <thead><tr><th class="c-item">${L.item}</th><th class="c-qty">${L.qty}</th><th class="c-num">${L.unitPrice}</th><th class="c-num">${L.total}</th></tr></thead>
+        <tbody>${itemRows}</tbody>
       </table>
-
-      <div class="totals-wrap">
-        <div class="totals">
-          <div class="totals-row"><span>${L.subtotal}</span><span><bdi>${fmt(computed.subtotal)} ${L.currency}</bdi></span></div>
-          ${computed.invoiceDiscountAmount > 0 ? `<div class="totals-row"><span>${L.invoiceDiscount}</span><span><bdi>-${fmt(computed.invoiceDiscountAmount)} ${L.currency}</bdi></span></div>` : ""}
-          <div class="grand-total"><span>${L.grandTotal}</span><span><bdi>${fmt(computed.grandTotal)} ${L.currency}</bdi></span></div>
-        </div>
-      </div>
-
+      <table class="sumwrap"><tr><td class="sp"></td><td>
+        <table class="sums">
+          ${computed.invoiceDiscountAmount > 0 ? sumRow(L.subtotal, `${fmt(computed.subtotal)} ${L.currency}`) : ""}
+          ${computed.invoiceDiscountAmount > 0 ? sumRow(L.invoiceDiscount, `− ${fmt(computed.invoiceDiscountAmount)} ${L.currency}`) : ""}
+          <tr><td colspan="2" class="sum-rule"></td></tr>
+          ${sumRow(isWeb ? L.grandTotalPaid : L.grandTotal, `${fmt(computed.grandTotal)} ${L.currency}`, true)}
+        </table>
+      </td></tr></table>
+      ${pay ? `<div class="pay">${pay}</div>` : ""}
       ${invoice.note ? `<div class="note">${L.notes}: ${escHtml(invoice.note)}</div>` : ""}
-
       <div class="foot">
-        <div class="foot-thanks">${L.thanks}</div>
-        <div class="foot-note">${escHtml(biz.note || "SILENT CODE")}</div>
+        <div class="foot-thanks">${L.thanksBrand}</div>
+        <div class="foot-note">${L.footNote}</div>
+        <div class="foot-site">silentcodeofficial.com</div>
+        <div class="foot-legal">${L.legalLine}</div>
       </div>
     </div>
   `;
-  openPrintWindow(lang, html);
+  openPrintWindow(lang, html, invoiceStyles(lang));
 }
 
 function printPeriodNow(period, data, lang = "ar") {
@@ -989,6 +1054,7 @@ export default function CostingApp() {
     { id: "invoices", label: "فواتير البيع", icon: Receipt },
     { id: "webOrders", label: "طلبات الموقع", icon: Globe, badge: webState.pending.length + webState.warnings.length + fulfil.orders.filter((o) => (o.fulfillment_status || "new") === "new").length },
     { id: "offers", label: "العروض والخصومات", icon: Sparkles },
+    { id: "marketers", label: "المسوّقون والعمولات", icon: Users },
     { id: "customers", label: "العملاء", icon: Users },
     { id: "marketing", label: "التسويق والسامبلات", icon: Megaphone },
     { id: "losses", label: "خسائر التصنيع", icon: AlertTriangle },
@@ -1037,6 +1103,7 @@ export default function CostingApp() {
         {tab === "invoices" && <InvoicesTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "webOrders" && <WebOrdersTab data={data} webState={webState} onSync={syncWebOrders} onImport={importManualWebOrder} fulfil={fulfil} onReloadFulfil={loadFulfillment} onChangeStatus={changeFulfillment} />}
         {tab === "offers" && <OffersTab />}
+        {tab === "marketers" && <MarketersTab />}
         {tab === "customers" && <CustomersTab data={data} persist={persist} />}
         {tab === "marketing" && <MarketingTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "losses" && <LossesTab data={data} persist={persist} currentUser={currentUser} />}
@@ -2751,7 +2818,7 @@ function OffersTab() {
   const blank = { name: "", nameEn: "", percent: "", scope: "all", productIds: [], mode: "permanent", startDate: "", endDate: "", maxOrders: "" };
   const [form, setForm] = useState(blank);
   const [formError, setFormError] = useState("");
-  const blankCode = { code: "", kind: "percent", value: "", usage: "unlimited", maxUses: "", validity: "none", startDate: "", expires: "" };
+  const blankCode = { code: "", kind: "percent", value: "", usage: "unlimited", maxUses: "", validity: "none", startDate: "", expires: "", marketer: "", commission: "" };
   const [codeForm, setCodeForm] = useState(blankCode);
   const [codeError, setCodeError] = useState("");
   const [confirmState, setConfirmState] = useState(null);
@@ -2830,9 +2897,14 @@ function OffersTab() {
       if (!codeForm.startDate && !codeForm.expires) return setCodeError("اختر تاريخ بداية أو نهاية للكود.");
       if (codeForm.startDate && codeForm.expires && codeForm.expires < codeForm.startDate) return setCodeError("تاريخ النهاية قبل تاريخ البداية.");
     }
+    const commission = codeForm.commission === "" ? null : Number(codeForm.commission);
+    if (commission != null && !(commission >= 0 && commission <= 100)) return setCodeError("نسبة العمولة لازم تكون بين 0 و100.");
+    if (commission != null && !codeForm.marketer.trim()) return setCodeError("اكتب اسم المسوّق عشان تنحسب له العمولة.");
     setBusy(true);
     try {
       await saveCode({
+        marketer_name: codeForm.marketer.trim(),
+        commission_percent: codeForm.marketer.trim() ? commission : null,
         code: codeForm.code,
         percent_off: codeForm.kind === "percent" ? v : null,
         amount_off: codeForm.kind === "amount" ? v : null,
@@ -2852,7 +2924,7 @@ function OffersTab() {
   async function toggleCode(c) {
     setBusy(true);
     try {
-      await saveCode({ code: c.code, percent_off: c.percent_off, amount_off: c.amount_off, max_uses: c.max_uses, starts_at: c.starts_at, expires_at: c.expires_at, active: !c.active });
+      await saveCode({ code: c.code, percent_off: c.percent_off, amount_off: c.amount_off, max_uses: c.max_uses, starts_at: c.starts_at, expires_at: c.expires_at, active: !c.active, marketer_name: c.marketer_name || "", commission_percent: c.commission_percent });
       await reload();
     } catch (err) { setState((s) => ({ ...s, error: String(err.message || err) })); }
     setBusy(false);
@@ -3032,6 +3104,10 @@ function OffersTab() {
               </div>
             </>
           )}
+          <div className="grid-2">
+            <Field label="اسم المسوّق (اختياري)" hint="لو الكود لشخص يسوّق لك، اكتب اسمه عشان تطلع له إحصائية شهرية في قسم «المسوّقون»."><input value={codeForm.marketer} onChange={(e) => setCodeForm({ ...codeForm, marketer: e.target.value })} placeholder="مثال: سارة" maxLength={80} /></Field>
+            <Field label="عمولة المسوّق % (اختياري)" hint="نسبة من قيمة الطلب بعد الخصم."><input type="number" step="any" min="0" max="100" value={codeForm.commission} onChange={(e) => setCodeForm({ ...codeForm, commission: e.target.value })} placeholder="10" dir="ltr" /></Field>
+          </div>
           {codeError && <div className="alert-banner" style={{ marginBottom: 10 }}><AlertCircle size={15} /> {codeError}</div>}
           <button className="btn-primary" type="submit" disabled={busy}><Plus size={15} /> إضافة الكود</button>
         </form>
@@ -3040,7 +3116,7 @@ function OffersTab() {
             {state.codes.map((c) => (
               <div className="mini-list-row" key={c.code} style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                 <span style={{ flex: 1 }}>
-                  <strong dir="ltr">{c.code}</strong> — {c.percent_off != null ? `${Number(c.percent_off)}%` : `${Number(c.amount_off).toFixed(3)} ر.ع`}
+                  <strong dir="ltr">{c.code}</strong> — {c.percent_off != null ? `${Number(c.percent_off)}%` : `${Number(c.amount_off).toFixed(3)} ر.ع`}{c.marketer_name ? <span style={{ color: "var(--ink-soft)", fontWeight: 400 }}> · المسوّق: {c.marketer_name}{c.commission_percent != null ? ` (${Number(c.commission_percent)}%)` : ""}</span> : null}
                   <div style={{ fontSize: 12, color: "var(--ink-soft)" }}>
                     استُخدم {c.used_count || 0}{c.max_uses != null ? ` من ${c.max_uses}` : ""}
                     {c.starts_at ? ` · يبدأ ${muscatDate(c.starts_at)}` : ""}{c.expires_at ? ` · ينتهي ${muscatDate(c.expires_at)}` : (!c.starts_at ? " · بدون انتهاء" : "")}
@@ -3051,6 +3127,102 @@ function OffersTab() {
                 <button className="btn-ghost" disabled={busy} onClick={() => removeCode(c)}><Trash2 size={14} /></button>
               </div>
             ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MarketersTab() {
+  const thisMonth = () => muscatDate(new Date().toISOString()).slice(0, 7);
+  const [month, setMonth] = useState(thisMonth());
+  const [state, setState] = useState({ loading: true, error: "", rows: [] });
+
+  async function load(m) {
+    setState((s) => ({ ...s, loading: true, error: "" }));
+    try {
+      const r = await marketerReport(m);
+      setState({ loading: false, error: "", rows: r.rows || [] });
+    } catch (e) {
+      setState({ loading: false, error: "تعذر جلب التقرير. تأكد من تحديث دالة accounting-orders وتشغيل ملف add_marketer_codes.sql. (" + (e.message || e) + ")", rows: [] });
+    }
+  }
+  useEffect(() => { load(month); }, [month]);
+
+  function shiftMonth(delta) {
+    const [y, m] = month.split("-").map(Number);
+    const d = new Date(Date.UTC(y, m - 1 + delta, 1));
+    setMonth(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`);
+  }
+
+  // نجمّع حسب المسوّق (لو عنده أكثر من كود)
+  const grouped = useMemo(() => {
+    const map = new Map();
+    for (const r of state.rows) {
+      const g = map.get(r.marketer) || { marketer: r.marketer, codes: [], orders: 0, customers: 0, sales: 0, commission: 0, hasCommission: false };
+      g.codes.push(r.code);
+      g.orders += r.orders; g.customers += r.customers; g.sales += r.sales;
+      if (r.commission != null) { g.commission += r.commission; g.hasCommission = true; }
+      map.set(r.marketer, g);
+    }
+    return [...map.values()].sort((a, b) => b.orders - a.orders);
+  }, [state.rows]);
+  const totals = grouped.reduce((t, g) => ({ orders: t.orders + g.orders, sales: t.sales + g.sales, commission: t.commission + g.commission }), { orders: 0, sales: 0, commission: 0 });
+
+  function downloadCsv() {
+    const lines = [["المسوّق", "الأكواد", "عدد الطلبات", "عدد العملاء", "المبيعات (ر.ع)", "العمولة (ر.ع)"]];
+    for (const g of grouped) lines.push([g.marketer, g.codes.join(" + "), g.orders, g.customers, g.sales.toFixed(3), g.hasCommission ? g.commission.toFixed(3) : ""]);
+    const csv = "﻿" + lines.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const a = document.createElement("a");
+    a.href = url; a.download = `marketers-${month}.csv`; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  const MONTHS = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"];
+  const [yy, mm] = month.split("-").map(Number);
+
+  return (
+    <div className="page">
+      <PageHead
+        eyebrow="المتجر الإلكتروني"
+        title="المسوّقون والعمولات"
+        desc="لإنشاء كود لمسوّق: روح «العروض والخصومات» وأضف كود جديد واكتب اسم المسوّق ونسبة عمولته. هنا تشوف كل شهر كم طلب وعميل جابهم وكم عمولته. الطلبات الملغية لا تُحسب."
+      />
+      <div className="panel">
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
+          <button className="btn-ghost" onClick={() => shiftMonth(-1)}>الشهر السابق</button>
+          <strong style={{ minWidth: 120, textAlign: "center" }}>{MONTHS[mm - 1]} {yy}</strong>
+          <button className="btn-ghost" onClick={() => shiftMonth(1)} disabled={month >= thisMonth()}>الشهر التالي</button>
+          <span style={{ flex: 1 }} />
+          <button className="btn-ghost" onClick={downloadCsv} disabled={!grouped.length}>تنزيل Excel (CSV)</button>
+        </div>
+        {state.error && <div className="alert-banner"><AlertCircle size={15} /> {state.error}</div>}
+        {state.loading && !state.error && <div style={{ color: "var(--ink-soft)" }}>جاري التحميل...</div>}
+        {!state.loading && !state.error && grouped.length === 0 && (
+          <div style={{ color: "var(--ink-soft)" }}>ما في مسوّقين بعد. أضف كود بإسم مسوّق من «العروض والخصومات».</div>
+        )}
+        {!state.loading && !state.error && grouped.length > 0 && (
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>المسوّق</th><th>الكود</th><th>الطلبات</th><th>العملاء</th><th>المبيعات (ر.ع)</th><th>العمولة (ر.ع)</th></tr></thead>
+              <tbody>
+                {grouped.map((g) => (
+                  <tr key={g.marketer}>
+                    <td><strong>{g.marketer}</strong></td>
+                    <td dir="ltr" style={{ textAlign: "right" }}>{g.codes.join(" + ")}</td>
+                    <td>{g.orders}</td>
+                    <td>{g.customers}</td>
+                    <td>{fmt(g.sales)}</td>
+                    <td>{g.hasCommission ? <strong>{fmt(g.commission)}</strong> : "—"}</td>
+                  </tr>
+                ))}
+                <tr style={{ fontWeight: 700 }}>
+                  <td>الإجمالي</td><td></td><td>{totals.orders}</td><td></td><td>{fmt(totals.sales)}</td><td>{fmt(totals.commission)}</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         )}
       </div>
