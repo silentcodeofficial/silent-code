@@ -1090,6 +1090,7 @@ export default function CostingApp() {
     { id: "webOrders", label: "طلبات الموقع", icon: Globe, badge: webState.pending.length + webState.warnings.length + fulfil.orders.filter((o) => (o.fulfillment_status || "new") === "new").length },
     { id: "offers", label: "العروض والخصومات", icon: Sparkles },
     { id: "marketers", label: "المسوّقون والعمولات", icon: Users },
+    { id: "accounts", label: "الحسابات (صحار / كاش / ثواني)", icon: Wallet },
     { id: "vat", label: "الإقرار الضريبي (5%)", icon: FileText },
     { id: "customers", label: "العملاء", icon: Users },
     { id: "marketing", label: "التسويق والسامبلات", icon: Megaphone },
@@ -1141,6 +1142,7 @@ export default function CostingApp() {
         {tab === "webOrders" && <WebOrdersTab data={data} webState={webState} onSync={syncWebOrders} onImport={importManualWebOrder} fulfil={fulfil} onReloadFulfil={loadFulfillment} onChangeStatus={changeFulfillment} />}
         {tab === "offers" && <OffersTab />}
         {tab === "marketers" && <MarketersTab />}
+        {tab === "accounts" && <AccountsTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "vat" && <VatTab data={data} />}
         {tab === "customers" && <CustomersTab data={data} persist={persist} />}
         {tab === "marketing" && <MarketingTab data={data} persist={persist} currentUser={currentUser} />}
@@ -1169,8 +1171,9 @@ function Dashboard({ data }) {
     const totalCommission = agg.reduce((s, a) => s + a.commission, 0);
     const totalVat = agg.reduce((s, a) => s + a.vat, 0);
     const grossProfit = totalRevenue - totalCOGS;
-    const operatingNetProfit = grossProfit - totalMarketing - totalLosses - totalCommission - totalVat;
-    return { totalRevenue, totalCOGS, totalMarketing, totalLosses, totalCommission, totalVat, totalBranding, totalEquipmentAssets, grossProfit, operatingNetProfit };
+    const totalFees = (data.bankTxns || []).filter((t) => t.kind === "settlement").reduce((a, t) => a + settlementFee(t), 0);
+    const operatingNetProfit = grossProfit - totalMarketing - totalLosses - totalCommission - totalVat - totalFees;
+    return { totalFees, totalRevenue, totalCOGS, totalMarketing, totalLosses, totalCommission, totalVat, totalBranding, totalEquipmentAssets, grossProfit, operatingNetProfit };
   }, [agg, data]);
 
   const lowStock = data.materials.filter((m) => (Number(m.stock) || 0) <= (Number(m.minThreshold) || 0));
@@ -1187,6 +1190,7 @@ function Dashboard({ data }) {
     { label: "خسائر التصنيع", value: totals.totalLosses, color: "var(--danger)", Icon: AlertTriangle },
     { label: "عمولات المسوّقين", value: totals.totalCommission, color: "#8C6B3D", Icon: Users },
     { label: "ضريبة القيمة المضافة 5% (محجوزة)", value: totals.totalVat, color: "#6B4C8C", Icon: Receipt },
+    { label: "رسوم بوابة الدفع (ثواني)", value: totals.totalFees, color: "#8C3D5A", Icon: Wallet },
     {
       label: "الربح التشغيلي الصافي",
       value: totals.operatingNetProfit,
@@ -1230,7 +1234,7 @@ function Dashboard({ data }) {
       <div className="panel">
         <div className="panel-head">
           <h3>توزيع الربح التشغيلي على الشراكة</h3>
-          <span className="panel-sub">بعد خصم تكلفة البضاعة والتسويق والخسائر وعمولات المسوّقين وضريبة 5%</span>
+          <span className="panel-sub">بعد خصم تكلفة البضاعة والتسويق والخسائر وعمولات المسوّقين وضريبة 5% ورسوم بوابة الدفع</span>
         </div>
         <div className="split-row">
           <div className="split-card">
@@ -3318,6 +3322,201 @@ function vatQuarterData(data, year, q) {
   const gross = byMonth.reduce((s, m) => s + m.gross, 0);
   const vat = byMonth.reduce((s, m) => s + m.vat, 0);
   return { year, q, months, invs, byMonth, gross, vat, net: gross - vat };
+}
+
+
+/* ============================== الحسابات (صحار / كاش / ثواني) ============================== */
+
+const ACCOUNTS = [
+  { id: "sohar", name: "بنك صحار" },
+  { id: "cash", name: "الكاش" },
+  { id: "thawani", name: "ثواني (معلّق)" },
+];
+const accName = (id) => (ACCOUNTS.find((a) => a.id === id) || {}).name || id;
+const settlementFee = (t) => Math.max(0, (Number(t.gross) || 0) - (Number(t.received) || 0));
+
+function methodAccount(settings, method) {
+  const m = String(method || "");
+  const map = (settings && settings.methodAccounts) || {};
+  if (map[m]) return map[m] === "none" ? null : map[m];
+  if (/كاش|نقد/.test(m)) return "cash";
+  if (/ثواني|بوابة|pos|POS|رابط/.test(m)) return "thawani";
+  if (!m) return null;
+  return "sohar";
+}
+
+function txnEffects(t) {
+  const a = Number(t.amount) || 0;
+  if (t.kind === "opening" || t.kind === "deposit") return [{ acc: t.account, amt: a }];
+  if (t.kind === "withdraw") return [{ acc: t.account, amt: -a }];
+  if (t.kind === "transfer") return [{ acc: t.account, amt: -a }, { acc: t.to, amt: a }];
+  if (t.kind === "settlement") return [{ acc: "thawani", amt: -(Number(t.gross) || 0) }, { acc: "sohar", amt: Number(t.received) || 0 }];
+  return [];
+}
+
+function accountBalances(data) {
+  const txns = data.bankTxns || [];
+  const bal = { sohar: 0, cash: 0, thawani: 0 };
+  const sales = { sohar: 0, cash: 0, thawani: 0 };
+  const since = {};
+  ACCOUNTS.forEach((a) => {
+    const o = txns.filter((t) => t.kind === "opening" && t.account === a.id).sort((x, y) => String(y.date).localeCompare(String(x.date)))[0];
+    since[a.id] = o ? o.date : "";
+    if (o) bal[a.id] += Number(o.amount) || 0;
+  });
+  data.invoices.forEach((inv) => {
+    const acc = methodAccount(data.settings, inv.paymentMethod);
+    if (!acc || !bal.hasOwnProperty(acc)) return;
+    if (since[acc] && String(inv.date) < since[acc]) return;
+    const g = invoiceComputed(inv).grandTotal || 0;
+    sales[acc] += g; bal[acc] += g;
+  });
+  txns.filter((t) => t.kind !== "opening").forEach((t) => txnEffects(t).forEach((e) => { if (bal.hasOwnProperty(e.acc)) bal[e.acc] += e.amt; }));
+  const fees = txns.filter((t) => t.kind === "settlement").reduce((s, t) => s + settlementFee(t), 0);
+  return { bal, sales, since, fees };
+}
+
+function AccountsTab({ data, persist, currentUser }) {
+  const txns = data.bankTxns || [];
+  const info = useMemo(() => accountBalances(data), [data]);
+  const today = muscatDate(new Date().toISOString());
+  const [open, setOpen] = useState({ account: "sohar", amount: "", date: today });
+  const [mv, setMv] = useState({ kind: "deposit", account: "sohar", to: "cash", amount: "", date: today, note: "" });
+  const [st, setSt] = useState({ gross: "", received: "", date: today, note: "" });
+  const [stmt, setStmt] = useState("");
+  const methods = data.settings.paymentMethods || [];
+
+  function add(t) { persist({ ...data, bankTxns: [...txns, { id: uid("bt"), createdBy: currentUser?.name, ...t }] }); }
+  function remove(id) { persist({ ...data, bankTxns: txns.filter((t) => t.id !== id) }); }
+  function saveOpening() {
+    if (open.amount === "" || !open.date) return;
+    const rest = txns.filter((t) => !(t.kind === "opening" && t.account === open.account));
+    persist({ ...data, bankTxns: [...rest, { id: uid("bt"), kind: "opening", account: open.account, amount: Number(open.amount), date: open.date, note: "رصيد افتتاحي", createdBy: currentUser?.name }] });
+    setOpen({ ...open, amount: "" });
+  }
+  const mvBad = !(Number(mv.amount) > 0) || !mv.date || (mv.kind === "transfer" && mv.account === mv.to);
+  function saveMove() {
+    if (mvBad) return;
+    add({ kind: mv.kind, account: mv.account, to: mv.kind === "transfer" ? mv.to : undefined, amount: Number(mv.amount), date: mv.date, note: mv.note });
+    setMv({ ...mv, amount: "", note: "" });
+  }
+  const stGross = st.gross === "" ? info.bal.thawani : Number(st.gross);
+  const stBad = !(stGross > 0) || st.received === "" || Number(st.received) < 0 || Number(st.received) > stGross + 1e-9 || !st.date;
+  const stFee = Math.max(0, stGross - (Number(st.received) || 0));
+  function saveSettlement() {
+    if (stBad) return;
+    add({ kind: "settlement", gross: Number(stGross.toFixed(3)), received: Number(st.received), date: st.date, note: st.note });
+    setSt({ gross: "", received: "", date: today, note: "" });
+  }
+  function setMap(method, val) {
+    const m = { ...(data.settings.methodAccounts || {}), [method]: val };
+    persist({ ...data, settings: { ...data.settings, methodAccounts: m } });
+  }
+  function addThawaniMethods() {
+    const cur = data.settings.paymentMethods || [];
+    const add2 = ["ثواني - POS", "ثواني - رابط دفع"].filter((x) => !cur.includes(x));
+    if (add2.length) persist({ ...data, settings: { ...data.settings, paymentMethods: [...cur, ...add2] } });
+  }
+  const KIND = { opening: "رصيد افتتاحي", deposit: "إيداع", withdraw: "سحب / مصروف", transfer: "تحويل بين حسابين", settlement: "تسوية ثواني" };
+  const stmtDiff = stmt === "" ? null : Number(stmt) - info.bal.sohar;
+
+  return (
+    <div className="page">
+      <PageHead eyebrow="الحسابات" title="الحسابات: بنك صحار · الكاش · ثواني" desc="الرصيد يتحسب تلقائيًا: الافتتاحي + المبيعات + الإيداعات − السحوبات. ثواني تحوّل لصحار بعد يومين، وفرق التحويل = رسوم تنخصم من الربح." />
+
+      <div className="kpi-row">
+        {ACCOUNTS.map((a) => (
+          <div className="kpi-card" key={a.id} style={{ "--accent": a.id === "sohar" ? "var(--teal)" : a.id === "cash" ? "var(--copper)" : "#6B4C8C" }}>
+            <Wallet size={16} className="kpi-icon" />
+            <div className="kpi-label">{a.name}</div>
+            <div className="kpi-value">{fmt(info.bal[a.id])} <span className="unit">ر.ع</span></div>
+            <div className="panel-sub">{info.since[a.id] ? `الافتتاحي بتاريخ ${info.since[a.id]}` : "ما سجلت رصيد افتتاحي بعد"}</div>
+          </div>
+        ))}
+        <div className="kpi-card" style={{ "--accent": "#8C3D5A" }}>
+          <div className="kpi-label">إجمالي رسوم ثواني</div>
+          <div className="kpi-value">{fmt(info.fees)} <span className="unit">ر.ع</span></div>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-head"><h3>1) الرصيد الافتتاحي (مرة وحدة)</h3><span className="panel-sub">اكتب الرصيد الحالي اليوم، وما بعد كذا البرنامج يكمل لحاله. المبيعات قبل تاريخ الافتتاحي ما تنحسب.</span></div>
+        <div className="form-row four">
+          <Field label="الحساب"><select value={open.account} onChange={(e) => setOpen({ ...open, account: e.target.value })}>{ACCOUNTS.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></Field>
+          <Field label="الرصيد (ر.ع)"><input type="number" value={open.amount} onChange={(e) => setOpen({ ...open, amount: e.target.value })} /></Field>
+          <Field label="بتاريخ"><input type="date" value={open.date} onChange={(e) => setOpen({ ...open, date: e.target.value })} /></Field>
+        </div>
+        <button className="btn-primary" onClick={saveOpening} disabled={open.amount === "" || !open.date}>حفظ الرصيد الافتتاحي</button>
+      </div>
+
+      <div className="panel">
+        <div className="panel-head"><h3>2) تسوية ثواني (لما يوصلك التحويل في صحار)</h3><span className="panel-sub">المعلّق عند ثواني الحين: {fmt(info.bal.thawani)} ر.ع</span></div>
+        <div className="form-row four">
+          <Field label="المبلغ الإجمالي قبل الرسوم" hint="فاضي = كل المعلّق"><input type="number" value={st.gross} placeholder={fmt(info.bal.thawani)} onChange={(e) => setSt({ ...st, gross: e.target.value })} /></Field>
+          <Field label="المبلغ اللي وصل صحار فعلاً"><input type="number" value={st.received} onChange={(e) => setSt({ ...st, received: e.target.value })} /></Field>
+          <Field label="تاريخ الوصول"><input type="date" value={st.date} onChange={(e) => setSt({ ...st, date: e.target.value })} /></Field>
+          <Field label="ملاحظة"><input value={st.note} onChange={(e) => setSt({ ...st, note: e.target.value })} /></Field>
+        </div>
+        {st.received !== "" && !stBad && <p className="field-hint">الرسوم = {fmt(stFee)} ر.ع ({stGross > 0 ? ((stFee / stGross) * 100).toFixed(2) : 0}%) — تُسجَّل مصروف وتنخصم من الربح.</p>}
+        {st.received !== "" && Number(st.received) > stGross && <p className="field-hint stock-warning">⚠️ الواصل أكبر من المعلّق — راجع المبلغ أو سجّل المبيعات الناقصة.</p>}
+        <button className="btn-primary" onClick={saveSettlement} disabled={stBad}>تسجيل التسوية</button>
+      </div>
+
+      <div className="panel">
+        <div className="panel-head"><h3>3) حركة يدوية (إيداع / سحب / تحويل)</h3><span className="panel-sub">مشتريات ومصاريف ما تنخصم تلقائيًا من الحسابات — سجّلها هنا كسحب.</span></div>
+        <div className="form-row four">
+          <Field label="النوع"><select value={mv.kind} onChange={(e) => setMv({ ...mv, kind: e.target.value })}><option value="deposit">إيداع</option><option value="withdraw">سحب / مصروف</option><option value="transfer">تحويل بين حسابين</option></select></Field>
+          <Field label={mv.kind === "transfer" ? "من حساب" : "الحساب"}><select value={mv.account} onChange={(e) => setMv({ ...mv, account: e.target.value })}>{ACCOUNTS.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></Field>
+          {mv.kind === "transfer" && <Field label="إلى حساب"><select value={mv.to} onChange={(e) => setMv({ ...mv, to: e.target.value })}>{ACCOUNTS.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></Field>}
+          <Field label="المبلغ (ر.ع)"><input type="number" value={mv.amount} onChange={(e) => setMv({ ...mv, amount: e.target.value })} /></Field>
+          <Field label="التاريخ"><input type="date" value={mv.date} onChange={(e) => setMv({ ...mv, date: e.target.value })} /></Field>
+          <Field label="ملاحظة"><input value={mv.note} onChange={(e) => setMv({ ...mv, note: e.target.value })} /></Field>
+        </div>
+        <button className="btn-primary" onClick={saveMove} disabled={mvBad}><Plus size={16} /> إضافة</button>
+      </div>
+
+      <div className="panel">
+        <div className="panel-head"><h3>مطابقة مع كشف بنك صحار</h3></div>
+        <div className="form-row four">
+          <Field label="رصيد كشف البنك الحقيقي"><input type="number" value={stmt} onChange={(e) => setStmt(e.target.value)} /></Field>
+        </div>
+        {stmtDiff !== null && (Math.abs(stmtDiff) < 0.0005
+          ? <p className="field-hint">✅ مطابق تمامًا لرصيد البرنامج ({fmt(info.bal.sohar)} ر.ع).</p>
+          : <p className="field-hint stock-warning">⚠️ الفرق {fmt(stmtDiff)} ر.ع (الكشف − البرنامج). راجع تحويل غير مسجل أو تسوية ناقصة.</p>)}
+      </div>
+
+      <div className="panel">
+        <div className="panel-head"><h3>ربط طرق الدفع بالحسابات</h3><button className="btn-ghost" onClick={addThawaniMethods}>أضف «ثواني - POS» و«ثواني - رابط دفع»</button></div>
+        <div className="table-wrap"><table>
+          <thead><tr><th>طريقة الدفع في الفاتورة</th><th>تنزل في حساب</th></tr></thead>
+          <tbody>{methods.map((m) => (
+            <tr key={m}><td className="strong">{m}</td><td>
+              <select value={(data.settings.methodAccounts || {})[m] || methodAccount({}, m) || "none"} onChange={(e) => setMap(m, e.target.value)}>
+                {ACCOUNTS.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                <option value="none">لا يدخل أي حساب</option>
+              </select></td></tr>
+          ))}</tbody></table></div>
+        <p className="field-hint">تأكد إن تحويلات حسابات الشركاء الشخصية مضبوطة على «لا يدخل أي حساب» لو ما تبيها تدخل رصيد صحار.</p>
+      </div>
+
+      <div className="panel">
+        <div className="panel-head"><h3>سجل الحركات</h3></div>
+        {txns.length === 0 ? <Empty icon={Wallet} title="ما فيه حركات" sub="ابدأ بالرصيد الافتتاحي فوق." /> : (
+          <div className="table-wrap"><table>
+            <thead><tr><th>التاريخ</th><th>النوع</th><th>الحساب</th><th>المبلغ</th><th>الرسوم</th><th>ملاحظة</th><th></th></tr></thead>
+            <tbody>{[...txns].sort((a, b) => String(b.date).localeCompare(String(a.date))).map((t) => (
+              <tr key={t.id}>
+                <td>{t.date}</td><td className="strong">{KIND[t.kind] || t.kind}</td>
+                <td>{t.kind === "settlement" ? "ثواني ← صحار" : t.kind === "transfer" ? `${accName(t.account)} ← ${accName(t.to)}` : accName(t.account)}</td>
+                <td className="num">{t.kind === "settlement" ? `${fmt(t.gross)} → ${fmt(t.received)}` : fmt(t.amount)}</td>
+                <td className="num">{t.kind === "settlement" ? fmt(settlementFee(t)) : "—"}</td>
+                <td>{t.note}</td>
+                <td><button className="icon-btn danger" onClick={() => remove(t.id)}><Trash2 size={14} /></button></td>
+              </tr>))}</tbody></table></div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function VatTab({ data }) {
