@@ -1094,6 +1094,7 @@ export default function CostingApp() {
     { id: "offers", label: "العروض والخصومات", icon: Sparkles },
     { id: "marketers", label: "المسوّقون والعمولات", icon: Users },
     { id: "accounts", label: "الحسابات (صحار / كاش / ثواني)", icon: Wallet },
+    { id: "expenses", label: "المصروفات", icon: Receipt },
     { id: "vat", label: "الإقرار الضريبي (5%)", icon: FileText },
     { id: "customers", label: "العملاء", icon: Users },
     { id: "marketing", label: "التسويق والسامبلات", icon: Megaphone },
@@ -1146,6 +1147,7 @@ export default function CostingApp() {
         {tab === "offers" && <OffersTab />}
         {tab === "marketers" && <MarketersTab />}
         {tab === "accounts" && <AccountsTab data={data} persist={persist} currentUser={currentUser} />}
+        {tab === "expenses" && <ExpensesTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "vat" && <VatTab data={data} />}
         {tab === "customers" && <CustomersTab data={data} persist={persist} />}
         {tab === "marketing" && <MarketingTab data={data} persist={persist} currentUser={currentUser} />}
@@ -1175,8 +1177,9 @@ function Dashboard({ data }) {
     const totalVat = agg.reduce((s, a) => s + a.vat, 0);
     const grossProfit = totalRevenue - totalCOGS;
     const totalFees = (data.bankTxns || []).filter((t) => t.kind === "settlement").reduce((a, t) => a + settlementFee(t), 0);
-    const operatingNetProfit = grossProfit - totalMarketing - totalLosses - totalCommission - totalVat - totalFees;
-    return { totalFees, totalRevenue, totalCOGS, totalMarketing, totalLosses, totalCommission, totalVat, totalBranding, totalEquipmentAssets, grossProfit, operatingNetProfit };
+    const totalExpenses = (data.expenses || []).reduce((a, x) => a + (Number(x.amount) || 0), 0);
+    const operatingNetProfit = grossProfit - totalMarketing - totalLosses - totalCommission - totalVat - totalFees - totalExpenses;
+    return { totalExpenses, totalFees, totalRevenue, totalCOGS, totalMarketing, totalLosses, totalCommission, totalVat, totalBranding, totalEquipmentAssets, grossProfit, operatingNetProfit };
   }, [agg, data]);
 
   const lowStock = data.materials.filter((m) => (Number(m.stock) || 0) <= (Number(m.minThreshold) || 0));
@@ -1194,6 +1197,7 @@ function Dashboard({ data }) {
     { label: "عمولات المسوّقين", value: totals.totalCommission, color: "#8C6B3D", Icon: Users },
     { label: "ضريبة القيمة المضافة 5% (محجوزة)", value: totals.totalVat, color: "#6B4C8C", Icon: Receipt },
     { label: "رسوم بوابة الدفع (ثواني)", value: totals.totalFees, color: "#8C3D5A", Icon: Wallet },
+    { label: "مصروفات أخرى", value: totals.totalExpenses, color: "#8C4B3D", Icon: Receipt },
     {
       label: "الربح التشغيلي الصافي",
       value: totals.operatingNetProfit,
@@ -1237,7 +1241,7 @@ function Dashboard({ data }) {
       <div className="panel">
         <div className="panel-head">
           <h3>توزيع الربح التشغيلي على الشراكة</h3>
-          <span className="panel-sub">بعد خصم تكلفة البضاعة والتسويق والخسائر وعمولات المسوّقين وضريبة 5% ورسوم بوابة الدفع</span>
+          <span className="panel-sub">بعد خصم تكلفة البضاعة والتسويق والخسائر وعمولات المسوّقين وضريبة 5% ورسوم بوابة الدفع والمصروفات</span>
         </div>
         <div className="split-row">
           <div className="split-card">
@@ -3359,14 +3363,57 @@ function txnEffects(t) {
   return [];
 }
 
+function openingSince(txns) {
+  const since = {};
+  ACCOUNTS.forEach((a) => {
+    const o = (txns || []).filter((t) => t.kind === "opening" && t.account === a.id).sort((x, y) => String(y.date).localeCompare(String(x.date)))[0];
+    since[a.id] = o ? o.date : "";
+  });
+  return since;
+}
+
+// مصاريف الشحن التلقائية: صف لكل فاتورة فيها شحن (مشتق من الفواتير — ما يتخزن، فيروح مع الفاتورة لو انحذفت).
+// فواتير الكاش/التحويل: تنخصم يوم الفاتورة. فواتير ثواني: تنخصم من صحار يوم تسوية ثواني اللي تغطيها (الأقدم أولًا).
+function shippingLedger(data, extraGross = 0) {
+  const txns = data.bankTxns || [];
+  const since = openingSince(txns);
+  const shipAcc = (data.settings && data.settings.shippingAccount) || "sohar";
+  const settles = txns.filter((t) => t.kind === "settlement").sort((x, y) => String(x.date).localeCompare(String(y.date)));
+  const settledTotal = settles.reduce((sum, t) => sum + (Number(t.gross) || 0), 0) + (Number(extraGross) || 0);
+  const settleDateFor = (cum) => {
+    let run = 0;
+    for (const t of settles) { run += Number(t.gross) || 0; if (cum <= run + 0.0005) return t.date; }
+    return extraGross > 0 ? "قيد التسجيل" : "";
+  };
+  const rows = [];
+  let cum = 0;
+  [...data.invoices].sort((x, y) => String(x.date).localeCompare(String(y.date)) || (Number(x.number) || 0) - (Number(y.number) || 0)).forEach((inv) => {
+    const acc = methodAccount(data.settings, inv.paymentMethod);
+    if (!acc) return;
+    if (since[acc] && String(inv.date) < since[acc]) return;
+    const c = invoiceComputed(inv);
+    let settled = true, date = inv.date, account = acc === "cash" ? "cash" : shipAcc;
+    if (acc === "thawani") {
+      cum += c.totalPaid;
+      settled = cum <= settledTotal + 0.0005;
+      date = settled ? settleDateFor(cum) : "";
+      account = shipAcc;
+    }
+    if (!(c.shipping > 0)) return;
+    const effective = date && date !== "قيد التسجيل" ? date : "";
+    const deducted = settled && (!effective || !since[account] || effective >= since[account]);
+    rows.push({ id: inv.id, invoiceNo: inv.number, webNo: inv.webInvoiceNumber || "", invDate: inv.date, amount: c.shipping, account, settled, date, deducted });
+  });
+  return rows;
+}
+
 function accountBalances(data) {
   const txns = data.bankTxns || [];
   const bal = { sohar: 0, cash: 0, thawani: 0 };
   const sales = { sohar: 0, cash: 0, thawani: 0 };
-  const since = {};
+  const since = openingSince(txns);
   ACCOUNTS.forEach((a) => {
     const o = txns.filter((t) => t.kind === "opening" && t.account === a.id).sort((x, y) => String(y.date).localeCompare(String(x.date)))[0];
-    since[a.id] = o ? o.date : "";
     if (o) bal[a.id] += Number(o.amount) || 0;
   });
   data.invoices.forEach((inv) => {
@@ -3377,8 +3424,14 @@ function accountBalances(data) {
     sales[acc] += g; bal[acc] += g;
   });
   txns.filter((t) => t.kind !== "opening").forEach((t) => txnEffects(t).forEach((e) => { if (bal.hasOwnProperty(e.acc)) bal[e.acc] += e.amt; }));
-  const fees = txns.filter((t) => t.kind === "settlement").reduce((s, t) => s + settlementFee(t), 0);
-  return { bal, sales, since, fees };
+  // المصروفات اليدوية + مصاريف الشحن التلقائية المخصومة
+  const manual = (data.expenses || []);
+  manual.forEach((x) => { if (bal.hasOwnProperty(x.account)) bal[x.account] -= Number(x.amount) || 0; });
+  const ship = shippingLedger(data);
+  let shipOut = 0, shipPending = 0;
+  ship.forEach((r) => { if (r.deducted) { bal[r.account] -= r.amount; shipOut += r.amount; } else if (!r.settled) shipPending += r.amount; });
+  const fees = txns.filter((t) => t.kind === "settlement").reduce((sum, t) => sum + settlementFee(t), 0);
+  return { bal, sales, since, fees, shipOut, shipPending };
 }
 
 function AccountsTab({ data, persist, currentUser }) {
@@ -3427,7 +3480,7 @@ function AccountsTab({ data, persist, currentUser }) {
 
   return (
     <div className="page">
-      <PageHead eyebrow="الحسابات" title="الحسابات: بنك صحار · الكاش · ثواني" desc="الرصيد يتحسب تلقائيًا: الافتتاحي + المبيعات + الإيداعات − السحوبات. ثواني تحوّل لصحار بعد يومين، وفرق التحويل = رسوم تنخصم من الربح." />
+      <PageHead eyebrow="الحسابات" title="الحسابات: بنك صحار · الكاش · ثواني" desc="الرصيد يتحسب تلقائيًا: الافتتاحي + المبيعات + الإيداعات − السحوبات − المصروفات (ومنها الشحن). ثواني تحوّل لصحار بعد يومين، وفرق التحويل = رسوم تنخصم من الربح." />
 
       <div className="kpi-row">
         {ACCOUNTS.map((a) => (
@@ -3441,6 +3494,11 @@ function AccountsTab({ data, persist, currentUser }) {
         <div className="kpi-card" style={{ "--accent": "#8C3D5A" }}>
           <div className="kpi-label">إجمالي رسوم ثواني</div>
           <div className="kpi-value">{fmt(info.fees)} <span className="unit">ر.ع</span></div>
+        </div>
+        <div className="kpi-card" style={{ "--accent": "#3D6B8C" }}>
+          <div className="kpi-label">شحن مخصوم من الحسابات</div>
+          <div className="kpi-value">{fmt(info.shipOut)} <span className="unit">ر.ع</span></div>
+          {info.shipPending > 0 && <div className="panel-sub">شحن بانتظار تسوية ثواني: {fmt(info.shipPending)} ر.ع</div>}
         </div>
       </div>
 
@@ -3462,6 +3520,7 @@ function AccountsTab({ data, persist, currentUser }) {
           <Field label="تاريخ الوصول"><input type="date" value={st.date} onChange={(e) => setSt({ ...st, date: e.target.value })} /></Field>
           <Field label="ملاحظة"><input value={st.note} onChange={(e) => setSt({ ...st, note: e.target.value })} /></Field>
         </div>
+        {st.received !== "" && !stBad && (() => { const d = shippingLedger(data, stGross).filter((r) => r.deducted).reduce((x, r) => x + r.amount, 0) - shippingLedger(data).filter((r) => r.deducted).reduce((x, r) => x + r.amount, 0); return d > 0.0005 ? <p className="field-hint">🚚 مع هالتسوية ينخصم من صحار شحن بقيمة {fmt(d)} ر.ع (للفواتير اللي تغطيها).</p> : null; })()}
         {st.received !== "" && !stBad && <p className="field-hint">الرسوم = {fmt(stFee)} ر.ع ({stGross > 0 ? ((stFee / stGross) * 100).toFixed(2) : 0}%) — تُسجَّل مصروف وتنخصم من الربح.</p>}
         {st.received !== "" && Number(st.received) > stGross && <p className="field-hint stock-warning">⚠️ الواصل أكبر من المعلّق — راجع المبلغ أو سجّل المبيعات الناقصة.</p>}
         <button className="btn-primary" onClick={saveSettlement} disabled={stBad}>تسجيل التسوية</button>
@@ -3501,6 +3560,7 @@ function AccountsTab({ data, persist, currentUser }) {
                 <option value="none">لا يدخل أي حساب</option>
               </select></td></tr>
           ))}</tbody></table></div>
+        <Field label="الحساب اللي ينخصم منه الشحن (لفواتير التحويل وثواني)" hint="فواتير الكاش ينخصم شحنها من الكاش دائمًا"><select value={(data.settings && data.settings.shippingAccount) || "sohar"} onChange={(e) => persist({ ...data, settings: { ...data.settings, shippingAccount: e.target.value } })}><option value="sohar">بنك صحار</option><option value="cash">الكاش</option></select></Field>
         <p className="field-hint">تأكد إن تحويلات حسابات الشركاء الشخصية مضبوطة على «لا يدخل أي حساب» لو ما تبيها تدخل رصيد صحار.</p>
       </div>
 
@@ -3520,6 +3580,61 @@ function AccountsTab({ data, persist, currentUser }) {
               </tr>))}</tbody></table></div>
         )}
       </div>
+    </div>
+  );
+}
+
+
+function ExpensesTab({ data, persist, currentUser }) {
+  const list = data.expenses || [];
+  const today = muscatDate(new Date().toISOString());
+  const empty = { date: today, title: "", amount: "", account: "sohar", invoiceNo: "", note: "" };
+  const [form, setForm] = useState(empty);
+  const ship = useMemo(() => shippingLedger(data), [data]);
+  const totalManual = list.reduce((sum, x) => sum + (Number(x.amount) || 0), 0);
+  const shipDone = ship.filter((r) => r.deducted).reduce((sum, r) => sum + r.amount, 0);
+  const shipWait = ship.filter((r) => !r.settled).reduce((sum, r) => sum + r.amount, 0);
+  const bad = !form.title.trim() || !(Number(form.amount) > 0) || !form.date;
+  function save() {
+    if (bad) return;
+    persist({ ...data, expenses: [...list, { id: uid("ex"), ...form, title: form.title.trim(), amount: Number(form.amount), createdBy: currentUser?.name }] });
+    setForm({ ...empty, account: form.account });
+  }
+  function remove(id) { persist({ ...data, expenses: list.filter((x) => x.id !== id) }); }
+  const rows = [
+    ...list.map((x) => ({ key: x.id, date: x.date, title: x.title, invoice: x.invoiceNo ? `#${x.invoiceNo}` : "", amount: x.amount, account: accName(x.account), kind: "يدوي", status: "مخصوم", id: x.id })),
+    ...ship.map((r) => ({ key: "ship_" + r.id, date: r.date || r.invDate, title: `مصروف شحن — فاتورة #${r.invoiceNo}${r.webNo ? ` (${r.webNo})` : ""}`, invoice: `#${r.invoiceNo}`, amount: r.amount, account: accName(r.account), kind: "شحن تلقائي", status: r.deducted ? "مخصوم" : r.settled ? "قبل تاريخ الافتتاحي" : "بانتظار تسوية ثواني" })),
+  ].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  return (
+    <div className="page">
+      <PageHead eyebrow="المصروفات" title="المصروفات" desc="مصروف عام ينخصم من الحساب ومن الربح. ومصاريف الشحن تنكتب لحالها لكل فاتورة فيها شحن (تعادل إيراد الشحن، فما تأثر على الربح)." />
+      <div className="kpi-row">
+        <div className="kpi-card" style={{ "--accent": "var(--danger)" }}><div className="kpi-label">مصروفات عامة (تنخصم من الربح)</div><div className="kpi-value">{fmt(totalManual)} <span className="unit">ر.ع</span></div></div>
+        <div className="kpi-card" style={{ "--accent": "#3D6B8C" }}><div className="kpi-label">شحن مخصوم من الحسابات</div><div className="kpi-value">{fmt(shipDone)} <span className="unit">ر.ع</span></div></div>
+        <div className="kpi-card" style={{ "--accent": "#8C6B3D" }}><div className="kpi-label">شحن بانتظار تسوية ثواني</div><div className="kpi-value">{fmt(shipWait)} <span className="unit">ر.ع</span></div></div>
+      </div>
+      <div className="panel">
+        <div className="panel-head"><h3>إضافة مصروف</h3><span className="panel-sub">لا تسجّل هنا تسويق أو خسائر أو تأسيس، لها تبويباتها.</span></div>
+        <div className="form-row four">
+          <Field label="البند"><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="مثال: إيجار، اشتراك..." /></Field>
+          <Field label="المبلغ (ر.ع)"><input type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} /></Field>
+          <Field label="ينخصم من"><select value={form.account} onChange={(e) => setForm({ ...form, account: e.target.value })}><option value="sohar">بنك صحار</option><option value="cash">الكاش</option></select></Field>
+          <Field label="التاريخ"><input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
+          <Field label="رقم فاتورة (اختياري)"><input value={form.invoiceNo} onChange={(e) => setForm({ ...form, invoiceNo: e.target.value })} /></Field>
+          <Field label="ملاحظة"><input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></Field>
+        </div>
+        <button className="btn-primary" onClick={save} disabled={bad}><Plus size={16} /> إضافة المصروف</button>
+      </div>
+      {rows.length === 0 ? <Empty icon={Receipt} title="ما فيه مصروفات" sub="أضف أول مصروف من الفورم فوق." /> : (
+        <div className="table-wrap"><table>
+          <thead><tr><th>التاريخ</th><th>البند</th><th>الفاتورة</th><th>المبلغ</th><th>الحساب</th><th>النوع</th><th>الحالة</th><th></th></tr></thead>
+          <tbody>{rows.map((r) => (
+            <tr key={r.key}>
+              <td>{r.date || "—"}</td><td className="strong">{r.title}</td><td>{r.invoice}</td><td className="num">{fmt(r.amount)} ر.ع</td><td>{r.account}</td>
+              <td><span className={`badge ${r.kind === "يدوي" ? "green" : "blue"}`}>{r.kind}</span></td><td>{r.status}</td>
+              <td>{r.id && <button className="icon-btn danger" onClick={() => remove(r.id)}><Trash2 size={14} /></button>}</td>
+            </tr>))}</tbody></table></div>
+      )}
     </div>
   );
 }
