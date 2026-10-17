@@ -188,6 +188,7 @@ export function buildInvoiceFromWebOrder(order, matches, nextNo, makeId) {
     webInvoiceNumber: order.invoice_number || "", // رقم الفاتورة اللي وصل للعميل بالإيميل (SC-00001)
     invoiceLang: order.lang === "en" ? "en" : "ar",
     paymentMethod: WEB_PAYMENT_METHOD,
+    shippingFee: (Number(order.shipping_fee) || 0) / 1000, // بيسة → ريال (تمرير لشركة الشحن)
     note: noteParts.join(" — "),
     discountType: "fixed",
     discountValue: discountAmount > 0 ? discountAmount : "",
