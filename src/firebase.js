@@ -76,6 +76,7 @@ export function defaultAppData() {
         "بوابة دفع إلكتروني",
         "ثواني - POS",
         "ثواني - رابط دفع",
+        "تحويل بنكي - صحار",
       ],
       partners: [
         { id: "partner_1", name: "سعيد", percent: 50, email: "" },
