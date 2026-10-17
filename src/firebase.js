@@ -50,6 +50,7 @@ const LIST_KEYS = [
   "losses",
   "branding",
   "equipment",
+  "bankTxns",
 ];
 
 export function defaultAppData() {
@@ -63,6 +64,7 @@ export function defaultAppData() {
     losses: [],
     branding: [],
     equipment: [],
+    bankTxns: [],
     settings: {
       paymentMethods: [
         "نقدًا (كاش)",
@@ -70,6 +72,8 @@ export function defaultAppData() {
         "تحويل - حسابي (سعيد)",
         "تحويل - حساب عبدالله",
         "بوابة دفع إلكتروني",
+        "ثواني - POS",
+        "ثواني - رابط دفع",
       ],
       partners: [
         { id: "partner_1", name: "سعيد", percent: 50, email: "" },
