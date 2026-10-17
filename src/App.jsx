@@ -265,7 +265,9 @@ function invoiceComputed(inv) {
     const share = subtotal > 0 ? it.afterLineDiscount / subtotal : 0;
     return { ...it, netRevenue: it.afterLineDiscount - invoiceDiscountAmount * share };
   });
-  return { items: itemsWithNet, subtotal, invoiceDiscountAmount, grandTotal };
+  // الشحن: مبلغ يدفعه العميل لشركة الشحن (تمرير) — ما يدخل الإيراد ولا الضريبة ولا الربح، لكنه يدخل المبلغ المدفوع والحسابات
+  const shipping = Math.max(0, Number(inv.shippingFee) || 0);
+  return { items: itemsWithNet, subtotal, invoiceDiscountAmount, grandTotal, shipping, totalPaid: grandTotal + shipping };
 }
 
 /* ---- printing: fully isolated popup window, independent of the app's own CSS/layout ---- */
@@ -276,7 +278,7 @@ const PRINT_LABELS = {
     docTitle: "فاتورة بيع", tagline: "صناعة وتغليف العطور",
     customerInfo: "معلومات العميل", delivery: "التسليم", pickup: "استلام من المصنع", deliveryType: "توصيل",
     item: "الصنف", qty: "الكمية", unitPrice: "سعر الوحدة", discount: "خصم", total: "الإجمالي",
-    subtotal: "المجموع", invoiceDiscount: "خصم الفاتورة", grandTotal: "الإجمالي الكلي",
+    subtotal: "المجموع", shipping: "الشحن", invoiceDiscount: "خصم الفاتورة", grandTotal: "الإجمالي الكلي",
     notes: "ملاحظات", thanks: "شكرًا لثقتكم بنا 🤍", gift: "🎁 هدية", currency: "ر.ع",
     periodTagline: "كشف حساب فترة (للاستخدام الداخلي)", from: "من", to: "إلى",
     invoiceNo: "رقم الفاتورة", customer: "العميل", paymentMethod: "طريقة الدفع", orderRef: "رقم الطلب", paid: "مدفوعة", email: "الإيميل", country: "الدولة",
@@ -290,7 +292,7 @@ const PRINT_LABELS = {
     docTitle: "Sales Invoice", tagline: "Perfume Manufacturing & Packaging",
     customerInfo: "Customer Info", delivery: "Delivery", pickup: "Factory Pickup", deliveryType: "Delivery",
     item: "Item", qty: "Qty", unitPrice: "Unit Price", discount: "Discount", total: "Total",
-    subtotal: "Subtotal", invoiceDiscount: "Invoice Discount", grandTotal: "Grand Total",
+    subtotal: "Subtotal", shipping: "Shipping", invoiceDiscount: "Invoice Discount", grandTotal: "Grand Total",
     notes: "Notes", thanks: "Thank you for your trust 🤍", gift: "🎁 Gift", currency: "OMR",
     periodTagline: "Period Statement (internal use)", from: "From", to: "To",
     invoiceNo: "Invoice No.", customer: "Customer", paymentMethod: "Payment Method", orderRef: "Order", paid: "PAID", email: "Email", country: "Country",
@@ -502,10 +504,11 @@ function printInvoiceNow(invoice, data, lang = "ar") {
       </table>
       <table class="sumwrap"><tr><td class="sp"></td><td>
         <table class="sums">
-          ${computed.invoiceDiscountAmount > 0 ? sumRow(L.subtotal, `${fmt(computed.subtotal)} ${L.currency}`) : ""}
+          ${computed.invoiceDiscountAmount > 0 || computed.shipping > 0 ? sumRow(L.subtotal, `${fmt(computed.subtotal)} ${L.currency}`) : ""}
           ${computed.invoiceDiscountAmount > 0 ? sumRow(L.invoiceDiscount, `− ${fmt(computed.invoiceDiscountAmount)} ${L.currency}`) : ""}
+          ${computed.shipping > 0 ? sumRow(L.shipping, `${fmt(computed.shipping)} ${L.currency}`) : ""}
           <tr><td colspan="2" class="sum-rule"></td></tr>
-          ${sumRow(isWeb ? L.grandTotalPaid : L.grandTotal, `${fmt(computed.grandTotal)} ${L.currency}`, true)}
+          ${sumRow(isWeb ? L.grandTotalPaid : L.grandTotal, `${fmt(computed.totalPaid)} ${L.currency}`, true)}
         </table>
       </td></tr></table>
       ${pay ? `<div class="pay">${pay}</div>` : ""}
@@ -531,7 +534,7 @@ function printPeriodNow(period, data, lang = "ar") {
       <td><bdi>${inv.date}</bdi></td>
       <td>${escHtml(inv.customerName || "—")}</td>
       <td>${escHtml(inv.paymentMethod || "—")}</td>
-      <td><bdi>${fmt(invoiceComputed(inv).grandTotal)}</bdi></td>
+      <td><bdi>${fmt(invoiceComputed(inv).totalPaid)}</bdi></td>
     </tr>`)
     .join("");
   const methodRows = Object.entries(byMethod).map(([method, amt]) => `<div class="totals-row"><span>${method}</span><span><bdi>${fmt(amt)} ${L.currency}</bdi></span></div>`).join("");
@@ -887,7 +890,7 @@ export default function CostingApp() {
           const m = matchWebItemsStrict(o, next.products, next.settings.webProductMap);
           const inv = buildInvoiceFromWebOrder(o, m, next.nextInvoiceNo, uid);
           const paidOmr = Number(o.total_amount) / 1000;
-          const calcOmr = invoiceComputed(inv).grandTotal;
+          const calcOmr = invoiceComputed(inv).totalPaid;
           if (Number.isFinite(paidOmr) && Math.abs(paidOmr - calcOmr) >= 0.0005) {
             amountWarnings.push(`⚠️ فرق بمبلغ طلب الموقع ${o.client_reference_id}: المدفوع ${fmt(paidOmr)} ر.ع مقابل فاتورة البرنامج ${fmt(calcOmr)} ر.ع — راجع الفاتورة.`);
           }
@@ -2333,7 +2336,7 @@ function InvoicesTab({ data, persist, currentUser }) {
       },
     });
   }
-  function invoiceTotal(inv) { return invoiceComputed(inv).grandTotal; }
+  function invoiceTotal(inv) { return invoiceComputed(inv).totalPaid; }
 
   const qn = q.trim().toLowerCase();
   const filtered = data.invoices.filter((inv) => (!dateFrom || inv.date >= dateFrom) && (!dateTo || inv.date <= dateTo)
@@ -2642,12 +2645,14 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
             <Field label="قيمة الخصم"><input type="number" value={inv.discountValue} onChange={(e) => set("discountValue", e.target.value)} /></Field>
           </div>
 
+          <Field label="رسوم الشحن (اختياري)" hint="مبلغ الشحن اللي يدفعه العميل — ما يدخل في الإيراد ولا الضريبة ولا الربح، لكنه يظهر في الفاتورة ويدخل رصيد الحساب"><input type="number" min="0" value={inv.shippingFee ?? ""} onChange={(e) => set("shippingFee", e.target.value)} /></Field>
           <Field label="ملاحظات (اختياري)"><textarea rows={2} value={inv.note} onChange={(e) => set("note", e.target.value)} /></Field>
 
           <div className="calc-summary">
             <div><span>المجموع قبل خصم الفاتورة</span><strong>{fmt(computed.subtotal)} ر.ع</strong></div>
             <div><span>خصم الفاتورة</span><strong className="neg">{fmt(computed.invoiceDiscountAmount)} ر.ع</strong></div>
-            <div><span>الإجمالي النهائي</span><strong>{fmt(computed.grandTotal)} ر.ع</strong></div>
+            {computed.shipping > 0 && <div><span>الشحن (يدفعه العميل لشركة الشحن)</span><strong>{fmt(computed.shipping)} ر.ع</strong></div>}
+            <div><span>الإجمالي النهائي (المدفوع)</span><strong>{fmt(computed.totalPaid)} ر.ع</strong></div>
           </div>
         </div>
         <div className="modal-foot">
@@ -2792,7 +2797,7 @@ function WebOrdersTab({ data, webState, onSync, onImport, fulfil, onReloadFulfil
     const inv = data.invoices.find((i) => i.webOrderRef === o.client_reference_id);
     if (!inv) return;
     const paid = Number(o.total_amount) / 1000;
-    const calc = invoiceComputed(inv).grandTotal;
+    const calc = invoiceComputed(inv).totalPaid;
     if (Number.isFinite(paid) && Math.abs(paid - calc) >= 0.0005) checks.push(`الطلب ${o.client_reference_id} (فاتورة #${inv.number}): المدفوع بالموقع ${fmt(paid)} ر.ع، وفاتورة البرنامج ${fmt(calc)} ر.ع.`);
     if (o.fulfillment_status === "cancelled") checks.push(`الطلب ${o.client_reference_id} (فاتورة #${inv.number}) ملغي بالموقع لكن فاتورته لسا محسوبة كإيراد ومنخصومة من المخزون. احذف الفاتورة أو عدّلها.`);
   });
@@ -2844,7 +2849,7 @@ function WebOrdersTab({ data, webState, onSync, onImport, fulfil, onReloadFulfil
             {webInvoices.map((inv) => (
               <div className="mini-list-row" key={inv.id}>
                 <span>#{inv.number}{inv.webInvoiceNumber ? ` (${inv.webInvoiceNumber})` : ""} · {inv.date} · {inv.customerName}</span>
-                <span className="num">{fmt(invoiceComputed(inv).grandTotal)} ر.ع</span>
+                <span className="num">{fmt(invoiceComputed(inv).totalPaid)} ر.ع</span>
               </div>
             ))}
           </div>
@@ -3368,7 +3373,7 @@ function accountBalances(data) {
     const acc = methodAccount(data.settings, inv.paymentMethod);
     if (!acc || !bal.hasOwnProperty(acc)) return;
     if (since[acc] && String(inv.date) < since[acc]) return;
-    const g = invoiceComputed(inv).grandTotal || 0;
+    const g = invoiceComputed(inv).totalPaid || 0;
     sales[acc] += g; bal[acc] += g;
   });
   txns.filter((t) => t.kind !== "opening").forEach((t) => txnEffects(t).forEach((e) => { if (bal.hasOwnProperty(e.acc)) bal[e.acc] += e.amt; }));
