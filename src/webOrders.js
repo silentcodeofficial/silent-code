@@ -46,6 +46,13 @@ export async function listWebOrders() {
   const json = await callBridge({ action: "orders_list" });
   return Array.isArray(json.orders) ? json.orders : [];
 }
+export const BANK_TRANSFER_METHOD = "تحويل بنكي - صحار";
+export async function listTransfers() {
+  const json = await callBridge({ action: "transfers_list" });
+  return Array.isArray(json.orders) ? json.orders : [];
+}
+export async function confirmTransfer(ref) { await callBridge({ action: "transfer_confirm", ref }); }
+export async function cancelTransfer(ref) { await callBridge({ action: "transfer_cancel", ref }); }
 export async function setWebOrderStatus(ref, status, note, notify = true) {
   const json = await callBridge({ action: "order_set_status", ref, status, note, notify });
   return json.order;
@@ -187,7 +194,7 @@ export function buildInvoiceFromWebOrder(order, matches, nextNo, makeId) {
       : null,
     webInvoiceNumber: order.invoice_number || "", // رقم الفاتورة اللي وصل للعميل بالإيميل (SC-00001)
     invoiceLang: order.lang === "en" ? "en" : "ar",
-    paymentMethod: WEB_PAYMENT_METHOD,
+    paymentMethod: order.payment_method === "bank_transfer" ? BANK_TRANSFER_METHOD : WEB_PAYMENT_METHOD,
     shippingFee: (Number(order.shipping_fee) || 0) / 1000, // بيسة → ريال (تمرير لشركة الشحن)
     note: noteParts.join(" — "),
     discountType: "fixed",
