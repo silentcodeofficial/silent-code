@@ -2465,7 +2465,8 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
     const it = inv.items.find((x) => x.id === id);
     if (!it || !it.productId) return;
     const ref = productReferenceCost(data, it.productId);
-    setItem(id, "unitPrice", Number(ref.unitCost.toFixed(3)));
+    // سعر التكلفة + 5% (تغطية الـVAT) — العميل يشوف رقم واحد فقط، والزيادة داخلية
+    setItem(id, "unitPrice", Number((ref.unitCost * (1 + VAT_RATE / 100)).toFixed(3)));
   }
   function addItem() { setInv({ ...inv, items: [...inv.items, { id: uid("it"), productId: "", qty: 1, unitPrice: "", discount: "", free: false }] }); }
   function removeItem(id) { setInv({ ...inv, items: inv.items.filter((it) => it.id !== id) }); }
@@ -2594,7 +2595,7 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
                       onChange={(e) => setItem(it.id, "discount", e.target.value)}
                     />
                     <button type="button" className={`chip-toggle ${it.free ? "active" : ""}`} onClick={() => toggleFree(it.id)}>🎁 مجاني (هدية)</button>
-                    <button type="button" className="chip-toggle" onClick={() => setAtCost(it.id)} disabled={!it.productId}>بسعر التكلفة</button>
+                    <button type="button" className="chip-toggle" onClick={() => setAtCost(it.id)} disabled={!it.productId} title="التكلفة + 5% ضريبة (ما تظهر للعميل)">بسعر التكلفة</button>
                   </div>
                 </div>
               );
