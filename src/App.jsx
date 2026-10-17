@@ -567,25 +567,42 @@ function printPeriodNow(period, data, lang = "ar") {
   openPrintWindow(lang, html);
 }
 
+/* ---- ضريبة القيمة المضافة (الأسعار شاملة الضريبة) وعمولة المسوّق ---- */
+const VAT_RATE = 5; // %
+// الضريبة المستخرجة من مبلغ شامل: المبلغ × 5 ÷ 105
+const vatOf = (grossInclusive) => (Number(grossInclusive) || 0) * VAT_RATE / (100 + VAT_RATE);
+// عمولة سطر واحد حسب ما انحفظ على الفاتورة وقت البيع: نسبة من صافي بيع المنتج، أو مبلغ ثابت لكل وحدة مباعة (الهدية ما تنحسب)
+function itemCommission(inv, it) {
+  const mk = inv.marketer;
+  if (!mk) return 0;
+  if (mk.type === "fixed") return it.free ? 0 : (Number(it.qty) || 0) * (Number(mk.fixed) || 0);
+  return (Number(it.netRevenue) || 0) * (Number(mk.percent) || 0) / 100;
+}
+function invoiceCommission(inv) {
+  return invoiceComputed(inv).items.reduce((s, it) => s + itemCommission(inv, it), 0);
+}
+
 function productRevenueQty(data, productId) {
-  let qty = 0, revenue = 0;
+  let qty = 0, revenue = 0, commission = 0, vat = 0;
   data.invoices.forEach((inv) => {
     const computed = invoiceComputed(inv);
     computed.items.forEach((it) => {
       if (it.productId === productId) {
         qty += it.qty;
         revenue += it.netRevenue;
+        commission += itemCommission(inv, it);
+        vat += vatOf(it.netRevenue);
       }
     });
   });
-  return { qty, revenue };
+  return { qty, revenue, commission, vat };
 }
 
 function computeAllProductAgg(data) {
   const totalRevenue = data.products.reduce((s, p) => s + productRevenueQty(data, p.id).revenue, 0);
   const totalGeneralMarketing = data.marketing.filter((m) => !m.productId).reduce((s, m) => s + (Number(m.cost) || 0), 0);
   return data.products.map((p) => {
-    const { qty, revenue } = productRevenueQty(data, p.id);
+    const { qty, revenue, commission, vat } = productRevenueQty(data, p.id);
     const ref = productReferenceCost(data, p.id);
     const cogs = qty * ref.unitCost;
     const direct = data.marketing.filter((m) => m.productId === p.id).reduce((s, m) => s + (Number(m.cost) || 0), 0);
@@ -593,8 +610,8 @@ function computeAllProductAgg(data) {
     const marketingTotal = direct + allocatedGeneral;
     const lossesTotal = data.losses.filter((l) => l.productId === p.id).reduce((s, l) => s + (Number(l.costTotal) || 0), 0);
     const grossProfit = revenue - cogs;
-    const netProfit = grossProfit - marketingTotal - lossesTotal;
-    return { product: p, qty, revenue, unitCost: ref.unitCost, costSource: ref.source, cogs, marketingTotal, lossesTotal, grossProfit, netProfit };
+    const netProfit = grossProfit - marketingTotal - lossesTotal - commission - vat;
+    return { product: p, qty, revenue, unitCost: ref.unitCost, costSource: ref.source, cogs, marketingTotal, lossesTotal, commission, vat, grossProfit, netProfit };
   });
 }
 
@@ -1073,6 +1090,7 @@ export default function CostingApp() {
     { id: "webOrders", label: "طلبات الموقع", icon: Globe, badge: webState.pending.length + webState.warnings.length + fulfil.orders.filter((o) => (o.fulfillment_status || "new") === "new").length },
     { id: "offers", label: "العروض والخصومات", icon: Sparkles },
     { id: "marketers", label: "المسوّقون والعمولات", icon: Users },
+    { id: "vat", label: "الإقرار الضريبي (5%)", icon: FileText },
     { id: "customers", label: "العملاء", icon: Users },
     { id: "marketing", label: "التسويق والسامبلات", icon: Megaphone },
     { id: "losses", label: "خسائر التصنيع", icon: AlertTriangle },
@@ -1123,6 +1141,7 @@ export default function CostingApp() {
         {tab === "webOrders" && <WebOrdersTab data={data} webState={webState} onSync={syncWebOrders} onImport={importManualWebOrder} fulfil={fulfil} onReloadFulfil={loadFulfillment} onChangeStatus={changeFulfillment} />}
         {tab === "offers" && <OffersTab />}
         {tab === "marketers" && <MarketersTab />}
+        {tab === "vat" && <VatTab data={data} />}
         {tab === "customers" && <CustomersTab data={data} persist={persist} />}
         {tab === "marketing" && <MarketingTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "losses" && <LossesTab data={data} persist={persist} currentUser={currentUser} />}
@@ -1147,9 +1166,11 @@ function Dashboard({ data }) {
     const totalLosses = data.losses.reduce((s, l) => s + (Number(l.costTotal) || 0), 0);
     const totalBranding = data.branding.reduce((s, b) => s + (Number(b.cost) || 0), 0);
     const totalEquipmentAssets = data.equipment.reduce((s, e) => s + (Number(e.cost) || 0), 0);
+    const totalCommission = agg.reduce((s, a) => s + a.commission, 0);
+    const totalVat = agg.reduce((s, a) => s + a.vat, 0);
     const grossProfit = totalRevenue - totalCOGS;
-    const operatingNetProfit = grossProfit - totalMarketing - totalLosses;
-    return { totalRevenue, totalCOGS, totalMarketing, totalLosses, totalBranding, totalEquipmentAssets, grossProfit, operatingNetProfit };
+    const operatingNetProfit = grossProfit - totalMarketing - totalLosses - totalCommission - totalVat;
+    return { totalRevenue, totalCOGS, totalMarketing, totalLosses, totalCommission, totalVat, totalBranding, totalEquipmentAssets, grossProfit, operatingNetProfit };
   }, [agg, data]);
 
   const lowStock = data.materials.filter((m) => (Number(m.stock) || 0) <= (Number(m.minThreshold) || 0));
@@ -1164,6 +1185,8 @@ function Dashboard({ data }) {
     { label: "تكلفة البضاعة المباعة", value: totals.totalCOGS, color: "var(--copper)", Icon: Package },
     { label: "مصاريف التسويق", value: totals.totalMarketing, color: "#3D6B8C", Icon: Megaphone },
     { label: "خسائر التصنيع", value: totals.totalLosses, color: "var(--danger)", Icon: AlertTriangle },
+    { label: "عمولات المسوّقين", value: totals.totalCommission, color: "#8C6B3D", Icon: Users },
+    { label: "ضريبة القيمة المضافة 5% (محجوزة)", value: totals.totalVat, color: "#6B4C8C", Icon: Receipt },
     {
       label: "الربح التشغيلي الصافي",
       value: totals.operatingNetProfit,
@@ -1207,7 +1230,7 @@ function Dashboard({ data }) {
       <div className="panel">
         <div className="panel-head">
           <h3>توزيع الربح التشغيلي على الشراكة</h3>
-          <span className="panel-sub">حسب نسب الإعدادات الحالية</span>
+          <span className="panel-sub">بعد خصم تكلفة البضاعة والتسويق والخسائر وعمولات المسوّقين وضريبة 5%</span>
         </div>
         <div className="split-row">
           <div className="split-card">
@@ -3145,13 +3168,13 @@ function OffersTab() {
           )}
           <div className="grid-2">
             <Field label="اسم المسوّق (اختياري)" hint="لو الكود لشخص يسوّق لك، اكتب اسمه عشان تطلع له إحصائية شهرية في قسم «المسوّقون»."><input value={codeForm.marketer} onChange={(e) => setCodeForm({ ...codeForm, marketer: e.target.value })} placeholder="مثال: سارة" maxLength={80} /></Field>
-            <Field label="نوع عمولة المسوّق" hint={codeForm.commissionType === "fixed" ? "مبلغ ثابت يستلمه عن كل طلب مدفوع بكوده." : "نسبة من قيمة الطلب بعد الخصم."}>
+            <Field label="نوع عمولة المسوّق" hint={codeForm.commissionType === "fixed" ? "مبلغ ثابت يستلمه عن كل منتج (قطعة) يُباع بكوده، يعني لو العميل اشترى 3 قطع يستلم 3 أضعاف المبلغ." : "نسبة من سعر كل منتج بعد الخصم."}>
               <select value={codeForm.commissionType} onChange={(e) => setCodeForm({ ...codeForm, commissionType: e.target.value, commission: "" })}>
                 <option value="percent">نسبة مئوية %</option>
-                <option value="fixed">مبلغ ثابت لكل طلب (ر.ع)</option>
+                <option value="fixed">مبلغ ثابت لكل منتج (ر.ع)</option>
               </select>
             </Field>
-            <Field label={codeForm.commissionType === "fixed" ? "مبلغ العمولة لكل طلب (ر.ع) — اختياري" : "نسبة العمولة % — اختياري"}><input type="number" step="any" min="0" max={codeForm.commissionType === "fixed" ? undefined : 100} value={codeForm.commission} onChange={(e) => setCodeForm({ ...codeForm, commission: e.target.value })} placeholder={codeForm.commissionType === "fixed" ? "1.000" : "10"} dir="ltr" /></Field>
+            <Field label={codeForm.commissionType === "fixed" ? "مبلغ العمولة لكل منتج (ر.ع) — اختياري" : "نسبة العمولة % — اختياري"}><input type="number" step="any" min="0" max={codeForm.commissionType === "fixed" ? undefined : 100} value={codeForm.commission} onChange={(e) => setCodeForm({ ...codeForm, commission: e.target.value })} placeholder={codeForm.commissionType === "fixed" ? "1.000" : "10"} dir="ltr" /></Field>
           </div>
           {codeError && <div className="alert-banner" style={{ marginBottom: 10 }}><AlertCircle size={15} /> {codeError}</div>}
           <button className="btn-primary" type="submit" disabled={busy}><Plus size={15} /> إضافة الكود</button>
@@ -3161,7 +3184,7 @@ function OffersTab() {
             {state.codes.map((c) => (
               <div className="mini-list-row" key={c.code} style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                 <span style={{ flex: 1 }}>
-                  <strong dir="ltr">{c.code}</strong> — {c.percent_off != null ? `${Number(c.percent_off)}%` : `${Number(c.amount_off).toFixed(3)} ر.ع`}{c.marketer_name ? <span style={{ color: "var(--ink-soft)", fontWeight: 400 }}> · المسوّق: {c.marketer_name}{c.commission_type === "fixed" && c.commission_fixed != null ? ` (${Number(c.commission_fixed).toFixed(3)} ر.ع لكل طلب)` : c.commission_percent != null ? ` (${Number(c.commission_percent)}%)` : ""}</span> : null}
+                  <strong dir="ltr">{c.code}</strong> — {c.percent_off != null ? `${Number(c.percent_off)}%` : `${Number(c.amount_off).toFixed(3)} ر.ع`}{c.marketer_name ? <span style={{ color: "var(--ink-soft)", fontWeight: 400 }}> · المسوّق: {c.marketer_name}{c.commission_type === "fixed" && c.commission_fixed != null ? ` (${Number(c.commission_fixed).toFixed(3)} ر.ع لكل منتج)` : c.commission_percent != null ? ` (${Number(c.commission_percent)}%)` : ""}</span> : null}
                   <div style={{ fontSize: 12, color: "var(--ink-soft)" }}>
                     استُخدم {c.used_count || 0}{c.max_uses != null ? ` من ${c.max_uses}` : ""}
                     {c.starts_at ? ` · يبدأ ${muscatDate(c.starts_at)}` : ""}{c.expires_at ? ` · ينتهي ${muscatDate(c.expires_at)}` : (!c.starts_at ? " · بدون انتهاء" : "")}
@@ -3205,9 +3228,9 @@ function MarketersTab() {
   const grouped = useMemo(() => {
     const map = new Map();
     for (const r of state.rows) {
-      const g = map.get(r.marketer) || { marketer: r.marketer, codes: [], orders: 0, customers: 0, sales: 0, commission: 0, hasCommission: false };
+      const g = map.get(r.marketer) || { marketer: r.marketer, codes: [], orders: 0, units: 0, customers: 0, sales: 0, commission: 0, hasCommission: false };
       g.codes.push(r.code);
-      g.orders += r.orders; g.customers += r.customers; g.sales += r.sales;
+      g.orders += r.orders; g.units += r.units || 0; g.customers += r.customers; g.sales += r.sales;
       if (r.commission != null) { g.commission += r.commission; g.hasCommission = true; }
       map.set(r.marketer, g);
     }
@@ -3216,8 +3239,8 @@ function MarketersTab() {
   const totals = grouped.reduce((t, g) => ({ orders: t.orders + g.orders, sales: t.sales + g.sales, commission: t.commission + g.commission }), { orders: 0, sales: 0, commission: 0 });
 
   function downloadCsv() {
-    const lines = [["المسوّق", "الأكواد", "عدد الطلبات", "عدد العملاء", "المبيعات (ر.ع)", "العمولة (ر.ع)"]];
-    for (const g of grouped) lines.push([g.marketer, g.codes.join(" + "), g.orders, g.customers, g.sales.toFixed(3), g.hasCommission ? g.commission.toFixed(3) : ""]);
+    const lines = [["المسوّق", "الأكواد", "عدد الطلبات", "عدد القطع", "عدد العملاء", "المبيعات (ر.ع)", "العمولة (ر.ع)"]];
+    for (const g of grouped) lines.push([g.marketer, g.codes.join(" + "), g.orders, g.units, g.customers, g.sales.toFixed(3), g.hasCommission ? g.commission.toFixed(3) : ""]);
     const csv = "﻿" + lines.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const a = document.createElement("a");
@@ -3251,25 +3274,162 @@ function MarketersTab() {
         {!state.loading && !state.error && grouped.length > 0 && (
           <div className="table-wrap">
             <table>
-              <thead><tr><th>المسوّق</th><th>الكود</th><th>الطلبات</th><th>العملاء</th><th>المبيعات (ر.ع)</th><th>العمولة (ر.ع)</th></tr></thead>
+              <thead><tr><th>المسوّق</th><th>الكود</th><th>الطلبات</th><th>القطع</th><th>العملاء</th><th>المبيعات (ر.ع)</th><th>العمولة (ر.ع)</th></tr></thead>
               <tbody>
                 {grouped.map((g) => (
                   <tr key={g.marketer}>
                     <td><strong>{g.marketer}</strong></td>
                     <td dir="ltr" style={{ textAlign: "right" }}>{g.codes.join(" + ")}</td>
                     <td>{g.orders}</td>
+                    <td>{g.units}</td>
                     <td>{g.customers}</td>
                     <td>{fmt(g.sales)}</td>
                     <td>{g.hasCommission ? <strong>{fmt(g.commission)}</strong> : "—"}</td>
                   </tr>
                 ))}
                 <tr style={{ fontWeight: 700 }}>
-                  <td>الإجمالي</td><td></td><td>{totals.orders}</td><td></td><td>{fmt(totals.sales)}</td><td>{fmt(totals.commission)}</td>
+                  <td>الإجمالي</td><td></td><td>{totals.orders}</td><td>{grouped.reduce((n, g) => n + g.units, 0)}</td><td></td><td>{fmt(totals.sales)}</td><td>{fmt(totals.commission)}</td>
                 </tr>
               </tbody>
             </table>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/* ============================== الإقرار الضريبي (ضريبة القيمة المضافة 5% — كشف داخلي) ============================== */
+
+const AR_MONTHS = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"];
+
+function vatQuarterData(data, year, q) {
+  const m0 = (q - 1) * 3 + 1;
+  const months = [m0, m0 + 1, m0 + 2].map((m) => `${year}-${String(m).padStart(2, "0")}`);
+  const invs = data.invoices
+    .filter((i) => months.includes(String(i.date || "").slice(0, 7)))
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.number || 0) - (b.number || 0)));
+  const byMonth = months.map((key) => {
+    const list = invs.filter((i) => String(i.date).slice(0, 7) === key);
+    const gross = list.reduce((s, i) => s + invoiceComputed(i).grandTotal, 0);
+    return { key, label: AR_MONTHS[Number(key.slice(5)) - 1], count: list.length, gross, vat: vatOf(gross), net: gross - vatOf(gross) };
+  });
+  const gross = byMonth.reduce((s, m) => s + m.gross, 0);
+  const vat = byMonth.reduce((s, m) => s + m.vat, 0);
+  return { year, q, months, invs, byMonth, gross, vat, net: gross - vat };
+}
+
+function VatTab({ data }) {
+  const nowYear = Number(muscatDate(new Date().toISOString()).slice(0, 4));
+  const nowQ = Math.floor((Number(muscatDate(new Date().toISOString()).slice(5, 7)) - 1) / 3) + 1;
+  const years = useMemo(() => {
+    const ys = new Set([nowYear]);
+    data.invoices.forEach((i) => { const y = Number(String(i.date || "").slice(0, 4)); if (y) ys.add(y); });
+    return [...ys].sort((a, b) => b - a);
+  }, [data.invoices, nowYear]);
+  const [year, setYear] = useState(nowYear);
+  const [q, setQ] = useState(nowQ);
+  const d = useMemo(() => vatQuarterData(data, year, q), [data, year, q]);
+  const all = useMemo(() => [1, 2, 3, 4].map((x) => vatQuarterData(data, year, x)), [data, year]);
+  const range = `${AR_MONTHS[(q - 1) * 3]} – ${AR_MONTHS[(q - 1) * 3 + 2]} ${year}`;
+
+  function downloadCsv() {
+    const lines = [["رقم الفاتورة", "التاريخ", "العميل", "الإجمالي شامل الضريبة (ر.ع)", "المبلغ قبل الضريبة (ر.ع)", `الضريبة ${VAT_RATE}% (ر.ع)`]];
+    d.invs.forEach((i) => {
+      const g = invoiceComputed(i).grandTotal;
+      lines.push([i.number, i.date, i.customerName || "", g.toFixed(3), (g - vatOf(g)).toFixed(3), vatOf(g).toFixed(3)]);
+    });
+    lines.push(["", "", "الإجمالي", d.gross.toFixed(3), d.net.toFixed(3), d.vat.toFixed(3)]);
+    const csv = "﻿" + lines.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const a = document.createElement("a");
+    a.href = url; a.download = `vat-${year}-Q${q}.csv`; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function printReturn() {
+    const rows = d.invs.map((i) => {
+      const g = invoiceComputed(i).grandTotal;
+      return `<tr><td><bdi>#${i.number}</bdi></td><td><bdi>${i.date}</bdi></td><td>${escHtml(i.customerName || "—")}</td><td><bdi>${fmt(g)}</bdi></td><td><bdi>${fmt(vatOf(g))}</bdi></td></tr>`;
+    }).join("");
+    const monthRows = d.byMonth.map((m) => `<div class="totals-row"><span>${m.label} (${m.count} فاتورة)</span><span><bdi>${fmt(m.gross)} | ضريبة ${fmt(m.vat)}</bdi></span></div>`).join("");
+    const html = `
+      <div class="accent-bar"></div>
+      <div class="sheet">
+        <div class="print-head">
+          <div class="head-col head-brand">
+            <div class="print-brand">SILENT CODE</div>
+            <div class="print-tagline">كشف ضريبة القيمة المضافة ${VAT_RATE}% — ${range}</div>
+          </div>
+          <div class="head-col head-meta"><div class="print-meta-line"><div>أصيل الفخامة ش.م.م — سجل تجاري 1648344</div></div></div>
+        </div>
+        <table class="items">
+          <thead><tr><th>رقم الفاتورة</th><th>التاريخ</th><th>العميل</th><th>الإجمالي شامل الضريبة</th><th>الضريبة ${VAT_RATE}%</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <div class="totals-wrap"><div class="totals">
+          ${monthRows}
+          <div class="totals-row"><span>المبيعات قبل الضريبة</span><span><bdi>${fmt(d.net)} ر.ع</bdi></span></div>
+          <div class="totals-row"><span>إجمالي المبيعات شامل الضريبة</span><span><bdi>${fmt(d.gross)} ر.ع</bdi></span></div>
+          <div class="grand-total"><span>الضريبة المستحقة ${VAT_RATE}%</span><span><bdi>${fmt(d.vat)} ر.ع</bdi></span></div>
+        </div></div>
+        <div class="foot"><div class="foot-note">الأسعار محسوبة شاملة الضريبة (الضريبة = المبلغ × ${VAT_RATE} ÷ ${100 + VAT_RATE}). كشف مستخرج من فواتير البيع، ولا يشمل ضريبة المشتريات. يُراجع مع محاسب قبل أي تقديم رسمي.</div></div>
+      </div>`;
+    openPrintWindow("ar", html);
+  }
+
+  return (
+    <div className="page">
+      <PageHead
+        eyebrow="المالية"
+        title="الإقرار الضريبي (5%)"
+        desc="كشف ربع سنوي بالضريبة المستخرجة من مبيعاتك (الأسعار محسوبة شاملة الضريبة). نفس المبلغ ينخصم تلقائيًا من الربح في لوحة التحكم، عشان تكون محجوزة لو انطلبت منك."
+      />
+      <div className="panel">
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
+          <select value={year} onChange={(e) => setYear(Number(e.target.value))}>{years.map((y) => <option key={y} value={y}>{y}</option>)}</select>
+          {[1, 2, 3, 4].map((x) => (
+            <button key={x} className={x === q ? "btn-primary" : "btn-ghost"} onClick={() => setQ(x)}>الربع {x}</button>
+          ))}
+          <span style={{ flex: 1 }} />
+          <button className="btn-ghost" onClick={downloadCsv} disabled={!d.invs.length}>تنزيل Excel (CSV)</button>
+          <button className="btn-primary" onClick={printReturn} disabled={!d.invs.length}><Printer size={15} /> طباعة / PDF</button>
+        </div>
+        <div className="kpi-row">
+          <div className="kpi-card"><div className="kpi-label">مبيعات {range} (شامل الضريبة)</div><div className="kpi-value">{fmt(d.gross)} <span className="unit">ر.ع</span></div></div>
+          <div className="kpi-card"><div className="kpi-label">المبيعات قبل الضريبة</div><div className="kpi-value">{fmt(d.net)} <span className="unit">ر.ع</span></div></div>
+          <div className="kpi-card" style={{ "--accent": "#6B4C8C" }}><div className="kpi-label">الضريبة المستحقة {VAT_RATE}%</div><div className="kpi-value">{fmt(d.vat)} <span className="unit">ر.ع</span></div></div>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-head"><h3>الأرباع الأربعة لسنة {year}</h3></div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>الربع</th><th>الفواتير</th><th>المبيعات شامل الضريبة</th><th>الضريبة المستحقة</th></tr></thead>
+            <tbody>
+              {all.map((x) => (
+                <tr key={x.q}><td>الربع {x.q} ({AR_MONTHS[(x.q - 1) * 3]} – {AR_MONTHS[(x.q - 1) * 3 + 2]})</td><td className="num">{x.invs.length}</td><td className="num">{fmt(x.gross)}</td><td className="num"><strong>{fmt(x.vat)}</strong></td></tr>
+              ))}
+              <tr style={{ fontWeight: 700 }}><td>السنة</td><td className="num">{all.reduce((s, x) => s + x.invs.length, 0)}</td><td className="num">{fmt(all.reduce((s, x) => s + x.gross, 0))}</td><td className="num">{fmt(all.reduce((s, x) => s + x.vat, 0))}</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-head"><h3>فواتير {range}</h3><span className="panel-sub">كل شهر لحاله</span></div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>الشهر</th><th>الفواتير</th><th>شامل الضريبة</th><th>قبل الضريبة</th><th>الضريبة</th></tr></thead>
+            <tbody>
+              {d.byMonth.map((m) => (
+                <tr key={m.key}><td>{m.label}</td><td className="num">{m.count}</td><td className="num">{fmt(m.gross)}</td><td className="num">{fmt(m.net)}</td><td className="num"><strong>{fmt(m.vat)}</strong></td></tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p style={{ margin: "10px 0 0", fontSize: 12, color: "var(--ink-soft)" }}>هذا كشف داخلي من فواتير البيع (بدون ضريبة المشتريات). راجعه مع محاسب قبل أي تقديم رسمي.</p>
       </div>
     </div>
   );
