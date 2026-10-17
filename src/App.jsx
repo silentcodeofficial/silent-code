@@ -11,7 +11,7 @@ import {
 } from "recharts";
 import { loadAppData, saveAppData, defaultAppData, watchAuth, signIn, signOutUser, resetPassword, ensureDailyBackup, listBackupDates, loadBackup } from "./firebase";
 import { uploadToGoogleDrive, deleteFromGoogleDrive } from "./googleDrive";
-import { pullWebOrders, ackWebOrders, pushWebStock, matchWebItems, matchWebItemsStrict, suggestWebProduct, listWebProducts, buildInvoiceFromWebOrder, muscatDate, listOffers, saveOffer, deleteOffer, saveCode, deleteCode, marketerReport, listWebOrders, setWebOrderStatus, FULFILLMENT_STATUSES } from "./webOrders";
+import { pullWebOrders, ackWebOrders, pushWebStock, matchWebItems, matchWebItemsStrict, suggestWebProduct, listWebProducts, buildInvoiceFromWebOrder, muscatDate, listOffers, saveOffer, deleteOffer, saveCode, deleteCode, marketerReport, listWebOrders, setWebOrderStatus, listTransfers, confirmTransfer, cancelTransfer, FULFILLMENT_STATUSES } from "./webOrders";
 
 /* ============================== helpers ============================== */
 
@@ -803,6 +803,7 @@ export default function CostingApp() {
   const syncingRef = useRef(false);
   const syncRef = useRef(null);
   const [fulfil, setFulfil] = useState({ orders: [], loading: false, error: "" });
+  const [transfers, setTransfers] = useState({ list: [], loading: false, error: "" });
   const [webState, setWebState] = useState({ pending: [], warnings: [], lastCheck: null, busy: false, error: "", importedNow: 0, stockSyncedAt: null, stockError: "" });
   const lastStockRef = useRef("");
   const pushStockRef = useRef(null);
@@ -929,7 +930,21 @@ export default function CostingApp() {
   syncRef.current = syncWebOrders;
 
   // متابعة تجهيز الطلبات (حالة كل طلب مدفوع بالموقع)
+  async function loadTransfers() {
+    setTransfers((t) => ({ ...t, loading: true }));
+    try { const list = await listTransfers(); setTransfers({ list, loading: false, error: "" }); }
+    catch (e) { setTransfers((t) => ({ ...t, loading: false, error: "تعذر تحميل التحويلات الآن." })); }
+  }
+  async function transferAction(ref, kind) {
+    try {
+      if (kind === "confirm") await confirmTransfer(ref); else await cancelTransfer(ref);
+      await loadTransfers();
+      if (kind === "confirm") { await syncWebOrders(); await loadFulfillment(); }
+      return "";
+    } catch (e) { return "تعذر تنفيذ العملية، حاول مرة ثانية."; }
+  }
   async function loadFulfillment() {
+    loadTransfers();
     setFulfil((f) => ({ ...f, loading: true }));
     try {
       const orders = await listWebOrders();
@@ -1090,7 +1105,7 @@ export default function CostingApp() {
     { id: "production", label: "دفعات الإنتاج", icon: Factory },
     { id: "finished", label: "المخزون الجاهز للبيع", icon: PackageCheck },
     { id: "invoices", label: "فواتير البيع", icon: Receipt },
-    { id: "webOrders", label: "طلبات الموقع", icon: Globe, badge: webState.pending.length + webState.warnings.length + fulfil.orders.filter((o) => (o.fulfillment_status || "new") === "new").length },
+    { id: "webOrders", label: "طلبات الموقع", icon: Globe, badge: transfers.list.length + webState.pending.length + webState.warnings.length + fulfil.orders.filter((o) => (o.fulfillment_status || "new") === "new").length },
     { id: "offers", label: "العروض والخصومات", icon: Sparkles },
     { id: "marketers", label: "المسوّقون والعمولات", icon: Users },
     { id: "accounts", label: "الحسابات (صحار / كاش / ثواني)", icon: Wallet },
@@ -1143,7 +1158,7 @@ export default function CostingApp() {
         {tab === "production" && <ProductionTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "finished" && <FinishedStockTab data={data} persist={persist} currentUser={currentUser} webState={webState} onPush={forcePushStock} />}
         {tab === "invoices" && <InvoicesTab data={data} persist={persist} currentUser={currentUser} />}
-        {tab === "webOrders" && <WebOrdersTab data={data} webState={webState} onSync={syncWebOrders} onImport={importManualWebOrder} fulfil={fulfil} onReloadFulfil={loadFulfillment} onChangeStatus={changeFulfillment} />}
+        {tab === "webOrders" && <WebOrdersTab data={data} webState={webState} onSync={syncWebOrders} onImport={importManualWebOrder} fulfil={fulfil} onReloadFulfil={loadFulfillment} onChangeStatus={changeFulfillment} transfers={transfers} onTransfer={transferAction} />}
         {tab === "offers" && <OffersTab />}
         {tab === "marketers" && <MarketersTab />}
         {tab === "accounts" && <AccountsTab data={data} persist={persist} currentUser={currentUser} />}
@@ -2763,6 +2778,40 @@ function FulfillmentRow({ order, onChangeStatus }) {
   );
 }
 
+function TransfersSection({ transfers, onTransfer }) {
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+  const list = (transfers && transfers.list) || [];
+  if (list.length === 0 && !(transfers && transfers.error)) return null;
+  async function act(ref, kind) {
+    if (kind === "cancel" && !window.confirm("إلغاء هذا الطلب؟ ما بيصير له فاتورة ولا ينقص مخزون.")) return;
+    setBusy(ref + kind); setErr("");
+    const e = await onTransfer(ref, kind);
+    setErr(e); setBusy("");
+  }
+  return (
+    <div className="panel" style={{ marginBottom: 14, borderColor: "var(--amber, #d9a441)" }}>
+      <div className="panel-head"><h3>🏦 تحويلات بنكية بانتظار التأكيد ({list.length})</h3><span className="panel-sub">راجع كشف صحار، ولما يوصل المبلغ اضغط «تم استلام التحويل». حينها يتحول الطلب لمدفوع وتنصدر الفاتورة وينخصم المخزون.</span></div>
+      {transfers.error && <div className="alert-banner" style={{ marginBottom: 8 }}><AlertCircle size={15} /> {transfers.error}</div>}
+      {err && <div className="alert-banner" style={{ marginBottom: 8 }}><AlertCircle size={15} /> {err}</div>}
+      <div className="table-wrap"><table>
+        <thead><tr><th>التاريخ</th><th>العميل</th><th>رقم الطلب (يكتبه في التحويل)</th><th>المنتجات</th><th>المبلغ المطلوب</th><th></th></tr></thead>
+        <tbody>{list.map((o) => (
+          <tr key={o.client_reference_id}>
+            <td>{muscatDate(o.created_at)}</td>
+            <td className="strong">{o.customer_name}<div className="panel-sub" dir="ltr">{o.phone}</div></td>
+            <td dir="ltr">{o.client_reference_id}</td>
+            <td>{(o.items || []).map((i) => `${i.name} × ${i.quantity}`).join("، ")}</td>
+            <td className="num"><strong>{fmt(Number(o.total_amount) / 1000)} ر.ع</strong>{Number(o.shipping_fee) > 0 ? <div className="panel-sub">منها شحن {fmt(Number(o.shipping_fee) / 1000)}</div> : null}</td>
+            <td><div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <button className="btn-primary" disabled={!!busy} onClick={() => act(o.client_reference_id, "confirm")}>{busy === o.client_reference_id + "confirm" ? "..." : "تم استلام التحويل"}</button>
+              <button className="btn-ghost" disabled={!!busy} onClick={() => act(o.client_reference_id, "cancel")}>إلغاء</button>
+            </div></td>
+          </tr>))}</tbody></table></div>
+    </div>
+  );
+}
+
 function FulfillmentSection({ fulfil, onReload, onChangeStatus }) {
   const [filter, setFilter] = useState("open");
   useEffect(() => { onReload(); }, []);
@@ -2793,7 +2842,7 @@ function FulfillmentSection({ fulfil, onReload, onChangeStatus }) {
   );
 }
 
-function WebOrdersTab({ data, webState, onSync, onImport, fulfil, onReloadFulfil, onChangeStatus }) {
+function WebOrdersTab({ data, webState, onSync, onImport, fulfil, onReloadFulfil, onChangeStatus, transfers, onTransfer }) {
   const webInvoices = data.invoices.filter((i) => i.source === "website").slice(-15).reverse();
   // فحص الربط: مبلغ فاتورة البرنامج لازم يساوي اللي دفعه العميل بالموقع، والطلب الملغي ما يبقى محسوب إيراد
   const checks = [];
@@ -2831,6 +2880,7 @@ function WebOrdersTab({ data, webState, onSync, onImport, fulfil, onReloadFulfil
           {checks.map((c, i) => <div key={i} style={{ marginTop: 4 }}>{c}</div>)}
         </div>
       )}
+      <TransfersSection transfers={transfers} onTransfer={onTransfer} />
       <FulfillmentSection fulfil={fulfil} onReload={onReloadFulfil} onChangeStatus={onChangeStatus} />
 
       {webState.pending.length > 0 && webState.pending.map((o) => (
@@ -3472,7 +3522,7 @@ function AccountsTab({ data, persist, currentUser }) {
   }
   function addThawaniMethods() {
     const cur = data.settings.paymentMethods || [];
-    const add2 = ["ثواني - POS", "ثواني - رابط دفع"].filter((x) => !cur.includes(x));
+    const add2 = ["ثواني - POS", "ثواني - رابط دفع", "تحويل بنكي - صحار"].filter((x) => !cur.includes(x));
     if (add2.length) persist({ ...data, settings: { ...data.settings, paymentMethods: [...cur, ...add2] } });
   }
   const KIND = { opening: "رصيد افتتاحي", deposit: "إيداع", withdraw: "سحب / مصروف", transfer: "تحويل بين حسابين", settlement: "تسوية ثواني" };
@@ -3550,7 +3600,7 @@ function AccountsTab({ data, persist, currentUser }) {
       </div>
 
       <div className="panel">
-        <div className="panel-head"><h3>ربط طرق الدفع بالحسابات</h3><button className="btn-ghost" onClick={addThawaniMethods}>أضف «ثواني - POS» و«ثواني - رابط دفع»</button></div>
+        <div className="panel-head"><h3>ربط طرق الدفع بالحسابات</h3><button className="btn-ghost" onClick={addThawaniMethods}>أضف طرق الدفع الناقصة (ثواني POS / رابط، تحويل بنكي - صحار)</button></div>
         <div className="table-wrap"><table>
           <thead><tr><th>طريقة الدفع في الفاتورة</th><th>تنزل في حساب</th></tr></thead>
           <tbody>{methods.map((m) => (
