@@ -180,6 +180,11 @@ export function buildInvoiceFromWebOrder(order, matches, nextNo, makeId) {
     customerPhone: order.phone || "",
     customerEmail: order.email || "",
     customerCountry: order.country_code || "",
+    discountCode: order.discount_code || "",
+    // لقطة عمولة المسوّق وقت البيع (ما تتغير لو غيّرت نسبة الكود بعدين)
+    marketer: order.marketer && order.marketer.name
+      ? { code: order.marketer.code || order.discount_code || "", name: order.marketer.name, type: order.marketer.type === "fixed" ? "fixed" : "percent", percent: Number(order.marketer.percent) || 0, fixed: Number(order.marketer.fixed) || 0 }
+      : null,
     webInvoiceNumber: order.invoice_number || "", // رقم الفاتورة اللي وصل للعميل بالإيميل (SC-00001)
     invoiceLang: order.lang === "en" ? "en" : "ar",
     paymentMethod: WEB_PAYMENT_METHOD,
