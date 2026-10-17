@@ -51,6 +51,7 @@ const LIST_KEYS = [
   "branding",
   "equipment",
   "bankTxns",
+  "expenses",
 ];
 
 export function defaultAppData() {
@@ -65,6 +66,7 @@ export function defaultAppData() {
     branding: [],
     equipment: [],
     bankTxns: [],
+    expenses: [],
     settings: {
       paymentMethods: [
         "نقدًا (كاش)",
