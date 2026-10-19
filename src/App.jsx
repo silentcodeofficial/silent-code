@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Boxes, Factory, Package, Receipt, Megaphone, AlertTriangle,
   Building2, Settings as SettingsIcon, Plus, Trash2, Printer, X, TrendingUp,
   TrendingDown, Loader2, ChevronLeft, Users, PackageX, Sparkles, AlertCircle,
-  ShoppingCart, Wallet, Pencil, Wrench, FileText, Globe, RefreshCw, PackageCheck
+  ShoppingCart, Wallet, Pencil, Wrench, FileText, Globe, RefreshCw, PackageCheck, ShieldCheck
 } from "lucide-react";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -651,6 +651,137 @@ function customerStats(invoices) {
   return [...map.values()].sort((a, b) => b.total - a.total);
 }
 
+/* ============================== الإلغاء / الإقفال / سجل التعديلات ============================== */
+
+// الفاتورة الملغاة (مرتجع): ما تدخل الإيراد ولا الضريبة ولا العمولة ولا المخزون، لكن تبقى محفوظة بالسجل.
+// وإذا انرد مبلغ للعميل (refundAmount) يبقى دخول المبلغ وخروج المرتجع ظاهرين بالحسابات.
+const isVoid = (inv) => !!(inv && inv.void);
+const voidRefund = (inv) => (isVoid(inv) ? Math.max(0, Number(inv.void.refundAmount) || 0) : 0);
+const countsInAccounts = (inv) => !isVoid(inv) || voidRefund(inv) > 0;
+function activeData(d) { return d && d.invoices.some(isVoid) ? { ...d, invoices: d.invoices.filter((i) => !isVoid(i)) } : d; }
+const lockDate = (d) => (d && d.settings && d.settings.lockedUntil) || "";
+const isLocked = (d, date) => { const l = lockDate(d); return !!l && !!date && String(date) <= l; };
+const lockMsg = (d) => `الفترة مقفلة لين ${lockDate(d)} — ما تقدر تضيف أو تعدّل أو تحذف شي بهالتاريخ. لو لازم، افتح الإقفال من الإعدادات.`;
+
+// إجمالي عملية شراء بالريال (شامل التكاليف الإضافية)
+function purchaseTotal(p) {
+  return (p.lines || []).reduce((s, l) => s + (Number(l.landedTotal) || (Number(l.qty) || 0) * (Number(l.unitCost) || 0)), 0);
+}
+const PAY_ACCOUNTS = [{ id: "sohar", name: "بنك صحار" }, { id: "cash", name: "الكاش" }];
+function PaidFromField({ value, onChange }) {
+  return (
+    <Field label="مدفوع من حساب" hint="يتخصم من رصيد الحساب تلقائيًا">
+      <select value={value || ""} onChange={(e) => onChange(e.target.value)}>
+        <option value="">غير مربوط (لا يتخصم)</option>
+        {PAY_ACCOUNTS.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+      </select>
+    </Field>
+  );
+}
+function VatPaidField({ value, onChange }) {
+  return (
+    <Field label="منها ضريبة 5% مدفوعة (اختياري)" hint="لو الفاتورة من مورّد مسجّل بالضريبة — تنخصم من ضريبتك المستحقة">
+      <input type="number" min="0" step="0.001" value={value ?? ""} onChange={(e) => onChange(e.target.value)} />
+    </Field>
+  );
+}
+
+// المبالغ المرتبطة بحسابات من التبويبات الأخرى (مشتريات، حملات تسويق، معدات، تأسيس)
+function linkedOutflows(data) {
+  const out = [];
+  (data.purchases || []).forEach((p) => { if (p.paidFrom) out.push({ id: p.id, kind: "شراء مواد", title: `شراء #${p.number}${p.note ? " — " + p.note : ""}`, date: p.date, amount: purchaseTotal(p), account: p.paidFrom }); });
+  (data.marketing || []).forEach((m) => { if (m.paidFrom && m.type !== "sample") out.push({ id: m.id, kind: "تسويق", title: m.title, date: m.date, amount: Number(m.cost) || 0, account: m.paidFrom }); });
+  (data.equipment || []).forEach((e) => { if (e.paidFrom) out.push({ id: e.id, kind: "معدات", title: e.title, date: e.date, amount: Number(e.cost) || 0, account: e.paidFrom }); });
+  (data.branding || []).forEach((b) => { if (b.paidFrom) out.push({ id: b.id, kind: "تأسيس", title: b.title, date: b.date, amount: Number(b.cost) || 0, account: b.paidFrom }); });
+  return out;
+}
+
+// ضريبة المشتريات (المدخلات) — مبالغ ضريبة مدفوعة مسجلة بالمشتريات والمصروفات والتسويق والمعدات والتأسيس
+function inputVatItems(data) {
+  const out = [];
+  (data.purchases || []).forEach((p) => { const v = Number(p.vatPaid) || 0; if (v > 0) out.push({ date: p.date, amount: v, title: `شراء #${p.number}` }); });
+  (data.expenses || []).forEach((x) => { const v = Number(x.vat) || 0; if (v > 0) out.push({ date: x.date, amount: v, title: x.title }); });
+  (data.marketing || []).forEach((m) => { const v = Number(m.vat) || 0; if (v > 0) out.push({ date: m.date, amount: v, title: m.title }); });
+  (data.equipment || []).forEach((e) => { const v = Number(e.vat) || 0; if (v > 0) out.push({ date: e.date, amount: v, title: e.title }); });
+  (data.branding || []).forEach((b) => { const v = Number(b.vat) || 0; if (v > 0) out.push({ date: b.date, amount: v, title: b.title }); });
+  return out;
+}
+
+// الإهلاك الشهري الثابت للمعدات (اختياري: عمر الاستخدام بالشهور)
+function monthsBetween(d1, d2) {
+  const a = String(d1 || ""), b = String(d2 || "");
+  if (a.length < 10 || b.length < 10) return 0;
+  const m = (Number(b.slice(0, 4)) - Number(a.slice(0, 4))) * 12 + (Number(b.slice(5, 7)) - Number(a.slice(5, 7))) - (Number(b.slice(8, 10)) < Number(a.slice(8, 10)) ? 1 : 0);
+  return Math.max(0, m);
+}
+function depreciationUpTo(e, dateStr) {
+  const life = Number(e.lifeMonths) || 0, cost = Number(e.cost) || 0;
+  if (!(life > 0) || !(cost > 0) || !dateStr) return 0;
+  return Math.min(cost, (cost / life) * monthsBetween(e.date, dateStr));
+}
+function depreciationInPeriod(equipment, from, to) {
+  const end = to || todayStr();
+  return (equipment || []).reduce((s, e) => {
+    const upTo = depreciationUpTo(e, end);
+    let before = 0;
+    if (from) { const d = new Date(from + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() - 1); before = depreciationUpTo(e, d.toISOString().slice(0, 10)); }
+    return s + Math.max(0, upTo - before);
+  }, 0);
+}
+
+// تصفية بيانات الفترة للوحة التحكم (الدفعات والوصفات تبقى كاملة لأن تكلفة الوحدة تعتمد عليها)
+function dataForPeriod(data, from, to) {
+  if (!from && !to) return data;
+  const inR = (d) => (!from || String(d || "") >= from) && (!to || String(d || "") <= to);
+  return {
+    ...data,
+    invoices: data.invoices.filter((i) => inR(i.date)),
+    marketing: data.marketing.filter((m) => inR(m.date)),
+    losses: data.losses.filter((l) => inR(l.date)),
+    branding: data.branding.filter((b) => inR(b.date)),
+    equipment: data.equipment.filter((e) => inR(e.date)),
+    expenses: (data.expenses || []).filter((x) => inR(x.date)),
+    purchases: data.purchases.filter((p) => inR(p.date)),
+    bankTxns: (data.bankTxns || []).filter((t) => t.kind === "opening" || inR(t.date)),
+  };
+}
+
+const AUDIT_AREAS = {
+  invoices: { label: "فاتورة بيع", name: (x) => `#${x.number} ${x.customerName || ""}`.trim(), amount: (x) => invoiceComputed(x).totalPaid },
+  purchases: { label: "شراء مواد", name: (x) => `#${x.number}${x.note ? " " + x.note : ""}`, amount: (x) => purchaseTotal(x) },
+  batches: { label: "دفعة إنتاج", name: (x) => String(x.code || x.number || x.date || x.id) },
+  marketing: { label: "تسويق", name: (x) => x.title, amount: (x) => Number(x.cost) || 0 },
+  losses: { label: "خسارة تصنيع", name: (x) => x.note || x.date, amount: (x) => Number(x.costTotal) || 0 },
+  branding: { label: "تأسيس", name: (x) => x.title, amount: (x) => Number(x.cost) || 0 },
+  equipment: { label: "معدات", name: (x) => x.title, amount: (x) => Number(x.cost) || 0 },
+  expenses: { label: "مصروف", name: (x) => x.title, amount: (x) => Number(x.amount) || 0 },
+  bankTxns: { label: "حركة حساب", name: (x) => `${x.kind}${x.note ? " — " + x.note : ""}`, amount: (x) => Number(x.amount) || Number(x.gross) || 0 },
+  materials: { label: "مادة", name: (x) => x.name, addDelOnly: true },
+  products: { label: "منتج", name: (x) => x.name, addDelOnly: true },
+};
+function buildAudit(prev, next, actor) {
+  if (!prev) return [];
+  const at = new Date().toISOString();
+  const out = [];
+  Object.entries(AUDIT_AREAS).forEach(([key, cfg]) => {
+    const a = prev[key] || [], b = next[key] || [];
+    if (a === b) return;
+    const am = new Map(a.map((x) => [x.id, x])), bm = new Map(b.map((x) => [x.id, x]));
+    const safe = (fn, x) => { try { return fn ? fn(x) : undefined; } catch (e) { return undefined; } };
+    b.forEach((x) => {
+      const o = am.get(x.id);
+      if (!o) { out.push({ id: uid("au"), at, by: actor, kind: "add", area: cfg.label, ref: safe(cfg.name, x), amount: safe(cfg.amount, x) }); return; }
+      if (cfg.addDelOnly || JSON.stringify(o) === JSON.stringify(x)) return;
+      const kind = key === "invoices" && x.void && !o.void ? "void" : key === "invoices" && !x.void && o.void ? "unvoid" : "edit";
+      out.push({ id: uid("au"), at, by: actor, kind, area: cfg.label, ref: safe(cfg.name, x), amount: safe(cfg.amount, x) });
+    });
+    a.forEach((x) => { if (!bm.has(x.id)) out.push({ id: uid("au"), at, by: actor, kind: "delete", area: cfg.label, ref: safe(cfg.name, x), amount: safe(cfg.amount, x) }); });
+  });
+  const pl = (prev.settings || {}).lockedUntil || "", nl = (next.settings || {}).lockedUntil || "";
+  if (pl !== nl) out.push({ id: uid("au"), at, by: actor, kind: "lock", area: "إقفال الفترة", ref: nl ? `إقفال لين ${nl}` : "فتح الإقفال" });
+  return out;
+}
+
 /* ============================== primitives ============================== */
 
 function ConfirmModal({ state, onCancel }) {
@@ -831,18 +962,58 @@ export default function CostingApp() {
     return () => { cancelled = true; };
   }, [authUser]);
 
-  async function persist(next) {
+  const savingRef = useRef(0);
+  const dirtyRef = useRef(false);
+  function actorName(d) {
+    const em = (authUser?.email || "").trim().toLowerCase();
+    const m = ((d && d.settings && d.settings.partners) || []).find((p) => (p.email || "").trim().toLowerCase() === em);
+    return m ? m.name : (authUser?.email || "—");
+  }
+  // opts.replace: استبدال كامل (استعادة نسخة) — opts.actor: اسم المنفذ بسجل التعديلات — opts.noAudit
+  async function persist(next, opts = {}) {
     const prev = dataRef.current ?? data;
+    if (!opts.noAudit && !opts.replace) {
+      const entries = buildAudit(prev, next, opts.actor || actorName(prev));
+      if (entries.length) next = { ...next, auditLog: [...(next.auditLog || prev.auditLog || []), ...entries].slice(-1500) };
+    }
     dataRef.current = next;
     setData(next);
+    savingRef.current += 1;
     try {
-      await saveAppData(prev, next);
+      const merged = await saveAppData(prev, next, { replace: !!opts.replace });
+      dirtyRef.current = false;
+      // لو الشريك الثاني غيّر شي بنفس الوقت، نعرضه عندنا (بشرط ما صار تعديل أحدث محليًا)
+      if (dataRef.current === next && JSON.stringify(merged) !== JSON.stringify(next)) { dataRef.current = merged; setData(merged); }
       return true;
     } catch (e) {
       console.error("save error", e);
+      dirtyRef.current = true;
       return false;
+    } finally {
+      savingRef.current -= 1;
     }
   }
+
+  // تحديث تلقائي لتعديلات الشريك الثاني (كل دقيقتين، ولما ترجع للنافذة) — فقط لو ما فيه حفظ جاري أو فاشل
+  useEffect(() => {
+    if (!authUser) return;
+    let busy = false;
+    const refresh = async () => {
+      if (busy || savingRef.current > 0 || dirtyRef.current || !dataRef.current || document.hidden) return;
+      busy = true;
+      try {
+        const fresh = await loadAppData();
+        if (savingRef.current === 0 && !dirtyRef.current && JSON.stringify(fresh) !== JSON.stringify(dataRef.current)) {
+          dataRef.current = fresh; setData(fresh);
+        }
+      } catch (e) { /* نحاول بالدورة الجاية */ }
+      busy = false;
+    };
+    const timer = setInterval(refresh, 120000);
+    const onVis = () => { if (!document.hidden) refresh(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", onVis); };
+  }, [authUser]);
 
   /* ---- استيراد طلبات الموقع المدفوعة كفواتير بيع ---- */
   function stockWarningsFor(nextData, orders) {
@@ -898,10 +1069,10 @@ export default function CostingApp() {
           next = { ...next, invoices: [...next.invoices, inv], nextInvoiceNo: next.nextInvoiceNo + 1 };
           importedItems.push({ items: inv.items });
         });
-        const ok = await persist(next);
+        const ok = await persist(next, { actor: "النظام (طلبات الموقع)" });
         if (ok) {
           ackRefs.push(...auto.map((o) => o.client_reference_id));
-          warnings = [...stockWarningsFor(next, importedItems), ...amountWarnings];
+          warnings = [...stockWarningsFor(activeData(next), importedItems), ...amountWarnings];
         } else {
           manual.push(...auto); // فشل الحفظ: نخليها تظهر بالتبويب ونعيد المحاولة
         }
@@ -960,7 +1131,7 @@ export default function CostingApp() {
 
   // مزامنة المخزون: نرسل "المتاح للبيع" لكل منتج للموقع (يتحدّث فقط لو تغيّر شي عن آخر مرة)
   async function pushStockNow() {
-    const cur = dataRef.current;
+    const cur = activeData(dataRef.current);
     if (!cur) return;
     const rev = {};
     Object.entries(cur.settings.webProductMap || {}).forEach(([webId, accId]) => { rev[accId] = webId; });
@@ -1011,7 +1182,7 @@ export default function CostingApp() {
     setWebState((s) => ({
       ...s,
       pending: s.pending.filter((o) => o.client_reference_id !== order.client_reference_id),
-      warnings: [...new Set([...s.warnings, ...stockWarningsFor(next, [{ items: inv.items }])])],
+      warnings: [...new Set([...s.warnings, ...stockWarningsFor(activeData(next), [{ items: inv.items }])])],
     }));
     return true;
   }
@@ -1097,27 +1268,44 @@ export default function CostingApp() {
     return match ? { id: match.id, name: match.name } : { id: authUser.uid, name: authUser.email };
   })();
 
-  const NAV = [
-    { id: "dashboard", label: "الرئيسية", icon: LayoutDashboard },
-    { id: "materials", label: "المخزون والمواد", icon: Boxes },
-    { id: "purchaseLog", label: "سجل المشتريات", icon: FileText },
-    { id: "products", label: "المنتجات والوصفات", icon: Package },
-    { id: "production", label: "دفعات الإنتاج", icon: Factory },
-    { id: "finished", label: "المخزون الجاهز للبيع", icon: PackageCheck },
-    { id: "invoices", label: "فواتير البيع", icon: Receipt },
-    { id: "webOrders", label: "طلبات الموقع", icon: Globe, badge: transfers.list.length + webState.pending.length + webState.warnings.length + fulfil.orders.filter((o) => (o.fulfillment_status || "new") === "new").length },
-    { id: "offers", label: "العروض والخصومات", icon: Sparkles },
-    { id: "marketers", label: "المسوّقون والعمولات", icon: Users },
-    { id: "accounts", label: "الحسابات (صحار / كاش / ثواني)", icon: Wallet },
-    { id: "expenses", label: "المصروفات", icon: Receipt },
-    { id: "vat", label: "الإقرار الضريبي (5%)", icon: FileText },
-    { id: "customers", label: "العملاء", icon: Users },
-    { id: "marketing", label: "التسويق والسامبلات", icon: Megaphone },
-    { id: "losses", label: "خسائر التصنيع", icon: AlertTriangle },
-    { id: "equipment", label: "المعدات والأصول الثابتة", icon: Wrench },
-    { id: "branding", label: "تكاليف التأسيس", icon: Building2 },
-    { id: "settings", label: "الإعدادات", icon: SettingsIcon },
+  const webBadge = transfers.list.length + webState.pending.length + webState.warnings.length + fulfil.orders.filter((o) => (o.fulfillment_status || "new") === "new").length;
+  const NAV_GROUPS = [
+    { title: "", items: [{ id: "dashboard", label: "الرئيسية", icon: LayoutDashboard }] },
+    { title: "المبيعات", items: [
+      { id: "invoices", label: "فواتير البيع", icon: Receipt },
+      { id: "webOrders", label: "طلبات الموقع", icon: Globe, badge: webBadge },
+      { id: "offers", label: "العروض والخصومات", icon: Sparkles },
+      { id: "marketers", label: "المسوّقون والعمولات", icon: Users },
+      { id: "customers", label: "العملاء", icon: Users },
+    ] },
+    { title: "الإنتاج والمخزون", items: [
+      { id: "materials", label: "المخزون والمواد", icon: Boxes },
+      { id: "purchaseLog", label: "سجل المشتريات", icon: FileText },
+      { id: "products", label: "المنتجات والوصفات", icon: Package },
+      { id: "production", label: "دفعات الإنتاج", icon: Factory },
+      { id: "finished", label: "المخزون الجاهز للبيع", icon: PackageCheck },
+      { id: "losses", label: "خسائر التصنيع", icon: AlertTriangle },
+    ] },
+    { title: "المالية", items: [
+      { id: "accounts", label: "الحسابات والشركاء", icon: Wallet },
+      { id: "expenses", label: "المصروفات", icon: Receipt },
+      { id: "marketing", label: "التسويق والسامبلات", icon: Megaphone },
+      { id: "equipment", label: "المعدات والأصول", icon: Wrench },
+      { id: "branding", label: "تكاليف التأسيس", icon: Building2 },
+      { id: "vat", label: "الإقرار الضريبي (5%)", icon: FileText },
+    ] },
+    { title: "النظام", items: [
+      { id: "audit", label: "سجل التعديلات", icon: ShieldCheck },
+      { id: "settings", label: "الإعدادات", icon: SettingsIcon },
+    ] },
   ];
+
+  // البيانات "الفعّالة" (بدون الفواتير الملغاة) لكل تبويب يحسب إيراد أو مخزون أو ضريبة
+  const vd = activeData(data);
+  const pv = (next, o) => {
+    const vs = (dataRef.current || data).invoices.filter(isVoid);
+    return persist(vs.length ? { ...next, invoices: [...next.invoices, ...vs] } : next, o);
+  };
 
   return (
     <div dir="rtl" className="app-shell">
@@ -1131,12 +1319,17 @@ export default function CostingApp() {
           </div>
         </div>
         <nav className="nav">
-          {NAV.map((n) => (
-            <button key={n.id} className={`nav-item ${tab === n.id ? "active" : ""}`} onClick={() => setTab(n.id)}>
-              <n.icon size={17} strokeWidth={2} />
-              <span>{n.label}</span>
-              {n.badge > 0 && <span className="badge amber" style={{ marginRight: "auto" }}>{n.badge}</span>}
-            </button>
+          {NAV_GROUPS.map((g, gi) => (
+            <div className="nav-group" key={gi}>
+              {g.title && <div className="nav-group-title">{g.title}</div>}
+              {g.items.map((n) => (
+                <button key={n.id} className={`nav-item ${tab === n.id ? "active" : ""}`} onClick={() => setTab(n.id)}>
+                  <n.icon size={16} strokeWidth={2} />
+                  <span>{n.label}</span>
+                  {n.badge > 0 && <span className="badge amber" style={{ marginRight: "auto" }}>{n.badge}</span>}
+                </button>
+              ))}
+            </div>
           ))}
         </nav>
         <div className="sidebar-user">
@@ -1151,24 +1344,25 @@ export default function CostingApp() {
       </aside>
 
       <main className="content">
-        {tab === "dashboard" && <Dashboard data={data} />}
-        {tab === "materials" && <MaterialsTab data={data} persist={persist} currentUser={currentUser} />}
-        {tab === "purchaseLog" && <PurchaseLogTab data={data} />}
-        {tab === "products" && <ProductsTab data={data} persist={persist} currentUser={currentUser} />}
-        {tab === "production" && <ProductionTab data={data} persist={persist} currentUser={currentUser} />}
-        {tab === "finished" && <FinishedStockTab data={data} persist={persist} currentUser={currentUser} webState={webState} onPush={forcePushStock} />}
+        {tab === "dashboard" && <Dashboard data={vd} />}
+        {tab === "materials" && <MaterialsTab data={vd} persist={pv} currentUser={currentUser} />}
+        {tab === "purchaseLog" && <PurchaseLogTab data={vd} />}
+        {tab === "products" && <ProductsTab data={vd} persist={pv} currentUser={currentUser} />}
+        {tab === "production" && <ProductionTab data={vd} persist={pv} currentUser={currentUser} />}
+        {tab === "finished" && <FinishedStockTab data={vd} persist={pv} currentUser={currentUser} webState={webState} onPush={forcePushStock} />}
         {tab === "invoices" && <InvoicesTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "webOrders" && <WebOrdersTab data={data} webState={webState} onSync={syncWebOrders} onImport={importManualWebOrder} fulfil={fulfil} onReloadFulfil={loadFulfillment} onChangeStatus={changeFulfillment} transfers={transfers} onTransfer={transferAction} />}
         {tab === "offers" && <OffersTab />}
         {tab === "marketers" && <MarketersTab />}
         {tab === "accounts" && <AccountsTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "expenses" && <ExpensesTab data={data} persist={persist} currentUser={currentUser} />}
-        {tab === "vat" && <VatTab data={data} />}
-        {tab === "customers" && <CustomersTab data={data} persist={persist} />}
-        {tab === "marketing" && <MarketingTab data={data} persist={persist} currentUser={currentUser} />}
-        {tab === "losses" && <LossesTab data={data} persist={persist} currentUser={currentUser} />}
-        {tab === "equipment" && <EquipmentTab data={data} persist={persist} currentUser={currentUser} />}
-        {tab === "branding" && <BrandingTab data={data} persist={persist} currentUser={currentUser} />}
+        {tab === "vat" && <VatTab data={vd} />}
+        {tab === "customers" && <CustomersTab data={vd} persist={pv} />}
+        {tab === "marketing" && <MarketingTab data={vd} persist={pv} currentUser={currentUser} />}
+        {tab === "losses" && <LossesTab data={vd} persist={pv} currentUser={currentUser} />}
+        {tab === "equipment" && <EquipmentTab data={vd} persist={pv} currentUser={currentUser} />}
+        {tab === "branding" && <BrandingTab data={vd} persist={pv} currentUser={currentUser} />}
+        {tab === "audit" && <AuditTab data={data} />}
         {tab === "settings" && <SettingsTab data={data} persist={persist} currentUser={currentUser} />}
       </main>
 
@@ -1179,46 +1373,114 @@ export default function CostingApp() {
 
 /* ============================== dashboard ============================== */
 
-function Dashboard({ data }) {
-  const agg = useMemo(() => computeAllProductAgg(data), [data]);
-  const totals = useMemo(() => {
-    const totalRevenue = agg.reduce((s, a) => s + a.revenue, 0);
-    const totalCOGS = agg.reduce((s, a) => s + a.cogs, 0);
-    const totalMarketing = data.marketing.reduce((s, m) => s + (Number(m.cost) || 0), 0);
-    const totalLosses = data.losses.reduce((s, l) => s + (Number(l.costTotal) || 0), 0);
-    const totalBranding = data.branding.reduce((s, b) => s + (Number(b.cost) || 0), 0);
-    const totalEquipmentAssets = data.equipment.reduce((s, e) => s + (Number(e.cost) || 0), 0);
-    const totalCommission = agg.reduce((s, a) => s + a.commission, 0);
-    const totalVat = agg.reduce((s, a) => s + a.vat, 0);
-    const grossProfit = totalRevenue - totalCOGS;
-    const totalFees = (data.bankTxns || []).filter((t) => t.kind === "settlement").reduce((a, t) => a + settlementFee(t), 0);
-    const totalExpenses = (data.expenses || []).reduce((a, x) => a + (Number(x.amount) || 0), 0);
-    const operatingNetProfit = grossProfit - totalMarketing - totalLosses - totalCommission - totalVat - totalFees - totalExpenses;
-    return { totalExpenses, totalFees, totalRevenue, totalCOGS, totalMarketing, totalLosses, totalCommission, totalVat, totalBranding, totalEquipmentAssets, grossProfit, operatingNetProfit };
-  }, [agg, data]);
+function periodRange(kind, today, cFrom, cTo) {
+  const y = Number(today.slice(0, 4)), m = Number(today.slice(5, 7));
+  const pad = (n) => String(n).padStart(2, "0");
+  const last = (yy, mm) => new Date(Date.UTC(yy, mm, 0)).getUTCDate();
+  if (kind === "month") return { from: `${y}-${pad(m)}-01`, to: `${y}-${pad(m)}-${pad(last(y, m))}`, label: `${AR_MONTHS[m - 1]} ${y}` };
+  if (kind === "prevmonth") { const pm = m === 1 ? 12 : m - 1, py = m === 1 ? y - 1 : y; return { from: `${py}-${pad(pm)}-01`, to: `${py}-${pad(pm)}-${pad(last(py, pm))}`, label: `${AR_MONTHS[pm - 1]} ${py}` }; }
+  if (kind === "quarter") { const q = Math.floor((m - 1) / 3), m0 = q * 3 + 1; return { from: `${y}-${pad(m0)}-01`, to: `${y}-${pad(m0 + 2)}-${pad(last(y, m0 + 2))}`, label: `الربع ${q + 1} · ${y}` }; }
+  if (kind === "year") return { from: `${y}-01-01`, to: `${y}-12-31`, label: `سنة ${y}` };
+  if (kind === "custom") return { from: cFrom || "", to: cTo || "", label: `${cFrom || "…"} → ${cTo || "…"}` };
+  return { from: "", to: "", label: "كل الفترات" };
+}
+
+function profitTotals(data, fullEquipment, from, to) {
+  const agg = computeAllProductAgg(data);
+  const totalRevenue = agg.reduce((s, a) => s + a.revenue, 0);
+  const totalCOGS = agg.reduce((s, a) => s + a.cogs, 0);
+  const totalMarketing = data.marketing.reduce((s, m) => s + (Number(m.cost) || 0), 0);
+  const totalLosses = data.losses.reduce((s, l) => s + (Number(l.costTotal) || 0), 0);
+  const totalBranding = data.branding.reduce((s, b) => s + (Number(b.cost) || 0), 0);
+  const totalEquipmentAssets = data.equipment.reduce((s, e) => s + (Number(e.cost) || 0), 0);
+  const totalCommission = agg.reduce((s, a) => s + a.commission, 0);
+  const outputVat = agg.reduce((s, a) => s + a.vat, 0);
+  const inputVat = inputVatItems(data).reduce((s, x) => s + x.amount, 0);
+  const totalVat = outputVat - inputVat; // صافي الضريبة المستحقة (مبيعات − مشتريات)
+  const grossProfit = totalRevenue - totalCOGS;
+  const totalFees = (data.bankTxns || []).filter((t) => t.kind === "settlement").reduce((a, t) => a + settlementFee(t), 0);
+  const totalExpenses = (data.expenses || []).reduce((a, x) => a + (Number(x.amount) || 0), 0);
+  const depreciation = depreciationInPeriod(fullEquipment, from, to);
+  const depInProfit = !!(data.settings && data.settings.depreciationInProfit);
+  const operatingNetProfit = grossProfit - totalMarketing - totalLosses - totalCommission - totalVat - totalFees - totalExpenses - (depInProfit ? depreciation : 0);
+  return { agg, totalExpenses, totalFees, totalRevenue, totalCOGS, totalMarketing, totalLosses, totalCommission, outputVat, inputVat, totalVat, totalBranding, totalEquipmentAssets, grossProfit, depreciation, depInProfit, operatingNetProfit };
+}
+
+function printPnL(label, t, partnerRows, devPercent, devShare) {
+  const row = (name, v, strong) => `<div class="totals-row"${strong ? ' style="font-weight:700"' : ""}><span>${name}</span><span><bdi>${fmt(v)} ر.ع</bdi></span></div>`;
+  const html = `
+    <div class="accent-bar"></div>
+    <div class="sheet">
+      <div class="print-head">
+        <div class="head-col head-brand"><div class="print-brand">SILENT CODE</div><div class="print-tagline">تقرير الأرباح والخسائر — ${escHtml(label)}</div></div>
+        <div class="head-col head-meta"><div class="print-meta-line"><div>أصيل الفخامة ش.م.م — سجل تجاري 1648344</div></div></div>
+      </div>
+      <div class="totals-wrap"><div class="totals" style="width:100%">
+        ${row("إجمالي الإيرادات (قبل الشحن)", t.totalRevenue, true)}
+        ${row("− تكلفة البضاعة المباعة", t.totalCOGS)}
+        ${row("= الربح الإجمالي", t.grossProfit, true)}
+        ${row("− مصاريف التسويق والسامبلات", t.totalMarketing)}
+        ${row("− خسائر التصنيع", t.totalLosses)}
+        ${row("− عمولات المسوّقين", t.totalCommission)}
+        ${row("− رسوم بوابة الدفع", t.totalFees)}
+        ${row("− مصروفات أخرى", t.totalExpenses)}
+        ${row("− ضريبة القيمة المضافة المستحقة (مبيعات " + fmt(t.outputVat) + " − مشتريات " + fmt(t.inputVat) + ")", t.totalVat)}
+        ${t.depInProfit ? row("− إهلاك الأصول الثابتة", t.depreciation) : ""}
+        <div class="grand-total"><span>الربح التشغيلي الصافي</span><span><bdi>${fmt(t.operatingNetProfit)} ر.ع</bdi></span></div>
+        ${row("نصيب تطوير المشروع (" + devPercent + "%)", devShare)}
+        ${partnerRows.map((p) => row(escHtml(p.name) + " — النصيب " + fmt(p.share) + " | المسحوب " + fmt(p.drawn), p.share - p.drawn)).join("")}
+      </div></div>
+      <div class="foot"><div class="foot-note">تقرير داخلي مستخرج من البرنامج. الشحن مبلغ تمرير ولا يدخل الإيراد ولا الربح. يُراجع مع محاسب قبل أي استخدام رسمي.</div></div>
+    </div>`;
+  openPrintWindow("ar", html);
+}
+
+function Dashboard({ data: full }) {
+  const [range, setRange] = useState("all");
+  const [cFrom, setCFrom] = useState("");
+  const [cTo, setCTo] = useState("");
+  const today = muscatDate(new Date().toISOString());
+  const { from, to, label } = useMemo(() => periodRange(range, today, cFrom, cTo), [range, today, cFrom, cTo]);
+  const data = useMemo(() => dataForPeriod(full, from, to), [full, from, to]);
+  const totals = useMemo(() => profitTotals(data, full.equipment, from, to), [data, full.equipment, from, to]);
+  const agg = totals.agg;
 
   const lowStock = data.materials.filter((m) => (Number(m.stock) || 0) <= (Number(m.minThreshold) || 0));
 
-  const devPercent = data.settings.devPercent || 0;
+  const devPercent = Number(data.settings.devPercent) || 0;
   const devShare = totals.operatingNetProfit * (devPercent / 100);
   const remaining = totals.operatingNetProfit - devShare;
   const partners = data.settings.partners || [];
+  const partnerRows = partners.map((p) => {
+    const mine = (data.bankTxns || []).filter((t) => t.partnerId === p.id);
+    return {
+      id: p.id, name: p.name, percent: p.percent,
+      share: remaining * ((Number(p.percent) || 0) / 100),
+      drawn: mine.filter((t) => t.kind === "partner_draw").reduce((x, t) => x + (Number(t.amount) || 0), 0),
+      capital: mine.filter((t) => t.kind === "capital").reduce((x, t) => x + (Number(t.amount) || 0), 0),
+    };
+  });
 
-  const kpis = [
-    { label: "إجمالي الإيرادات", value: totals.totalRevenue, color: "var(--teal)", Icon: TrendingUp },
-    { label: "تكلفة البضاعة المباعة", value: totals.totalCOGS, color: "var(--copper)", Icon: Package },
-    { label: "مصاريف التسويق", value: totals.totalMarketing, color: "#3D6B8C", Icon: Megaphone },
-    { label: "خسائر التصنيع", value: totals.totalLosses, color: "var(--danger)", Icon: AlertTriangle },
-    { label: "عمولات المسوّقين", value: totals.totalCommission, color: "#8C6B3D", Icon: Users },
-    { label: "ضريبة القيمة المضافة 5% (محجوزة)", value: totals.totalVat, color: "#6B4C8C", Icon: Receipt },
-    { label: "رسوم بوابة الدفع (ثواني)", value: totals.totalFees, color: "#8C3D5A", Icon: Wallet },
-    { label: "مصروفات أخرى", value: totals.totalExpenses, color: "#8C4B3D", Icon: Receipt },
-    {
-      label: "الربح التشغيلي الصافي",
-      value: totals.operatingNetProfit,
-      color: totals.operatingNetProfit >= 0 ? "var(--success)" : "var(--danger)",
-      Icon: totals.operatingNetProfit >= 0 ? TrendingUp : TrendingDown,
-    },
+  const profitColor = totals.operatingNetProfit >= 0 ? "var(--success)" : "var(--danger)";
+  const groups = [
+    { title: "الأداء", items: [
+      { label: "إجمالي الإيرادات", value: totals.totalRevenue, color: "var(--teal)", Icon: TrendingUp },
+      { label: "تكلفة البضاعة المباعة", value: totals.totalCOGS, color: "var(--copper)", Icon: Package },
+      { label: "الربح الإجمالي", value: totals.grossProfit, color: "var(--teal-dark)", Icon: TrendingUp },
+    ] },
+    { title: "المصاريف والخصومات", items: [
+      { label: "مصاريف التسويق", value: totals.totalMarketing, color: "#3D6B8C", Icon: Megaphone },
+      { label: "خسائر التصنيع", value: totals.totalLosses, color: "var(--danger)", Icon: AlertTriangle },
+      { label: "عمولات المسوّقين", value: totals.totalCommission, color: "#8C6B3D", Icon: Users },
+      { label: "رسوم بوابة الدفع (ثواني)", value: totals.totalFees, color: "#8C3D5A", Icon: Wallet },
+      { label: "مصروفات أخرى", value: totals.totalExpenses, color: "#8C4B3D", Icon: Receipt },
+      ...(totals.depInProfit ? [{ label: "إهلاك الأصول", value: totals.depreciation, color: "#5C6A63", Icon: Wrench }] : []),
+    ] },
+    { title: "ضريبة القيمة المضافة 5%", items: [
+      { label: "ضريبة المبيعات", value: totals.outputVat, color: "#6B4C8C", Icon: Receipt },
+      { label: "ضريبة المشتريات (تُخصم)", value: totals.inputVat, color: "#6B4C8C", Icon: Receipt },
+      { label: "صافي الضريبة المحجوزة", value: totals.totalVat, color: "#6B4C8C", Icon: Receipt },
+    ] },
   ];
 
   const chartData = data.products.map((p) => {
@@ -1230,19 +1492,47 @@ function Dashboard({ data }) {
     };
   });
 
+  const chips = [["all", "الكل"], ["month", "هذا الشهر"], ["prevmonth", "الشهر الماضي"], ["quarter", "هذا الربع"], ["year", "هذه السنة"], ["custom", "فترة مخصصة"]];
+
   return (
     <div className="page">
-      <PageHead eyebrow="نظرة عامة" title="لوحة التحكم" desc="ملخص أداء البزنس من التصنيع للبيع" />
+      <PageHead eyebrow="نظرة عامة" title="لوحة التحكم" desc="ملخص أداء البزنس من التصنيع للبيع"
+        action={<button className="btn-ghost" onClick={() => printPnL(label, totals, partnerRows, devPercent, devShare)}><Printer size={15} /> تقرير الأرباح والخسائر</button>} />
 
-      <div className="kpi-row">
-        {kpis.map((k) => (
-          <div className="kpi-card" key={k.label} style={{ "--accent": k.color }}>
-            <k.Icon size={16} className="kpi-icon" />
-            <div className="kpi-label">{k.label}</div>
-            <div className="kpi-value">{fmt(k.value)} <span className="unit">ر.ع</span></div>
-          </div>
-        ))}
+      <div className="period-bar">
+        {chips.map(([k, l]) => <button key={k} className={`chip-btn ${range === k ? "on" : ""}`} onClick={() => setRange(k)}>{l}</button>)}
+        {range === "custom" && (
+          <>
+            <input type="date" value={cFrom} onChange={(e) => setCFrom(e.target.value)} />
+            <span className="field-hint">إلى</span>
+            <input type="date" value={cTo} onChange={(e) => setCTo(e.target.value)} />
+          </>
+        )}
+        <span className="period-label">الفترة المعروضة: <strong>{label}</strong></span>
       </div>
+
+      <div className="profit-hero" style={{ "--accent": profitColor }}>
+        <div>
+          <div className="kpi-label">الربح التشغيلي الصافي — {label}</div>
+          <div className="profit-value">{fmt(totals.operatingNetProfit)} <span className="unit">ر.ع</span></div>
+        </div>
+        <div className="profit-note">= الربح الإجمالي − التسويق − الخسائر − العمولات − رسوم البوابة − المصروفات − صافي الضريبة{totals.depInProfit ? " − الإهلاك" : ""}</div>
+      </div>
+
+      {groups.map((g) => (
+        <div key={g.title} className="kpi-group">
+          <div className="kpi-group-title">{g.title}</div>
+          <div className="kpi-row">
+            {g.items.map((k) => (
+              <div className="kpi-card" key={k.label} style={{ "--accent": k.color }}>
+                <k.Icon size={16} className="kpi-icon" />
+                <div className="kpi-label">{k.label}</div>
+                <div className="kpi-value">{fmt(k.value)} <span className="unit">ر.ع</span></div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
 
       {lowStock.length > 0 && (
         <div className="alert-banner">
@@ -1256,22 +1546,23 @@ function Dashboard({ data }) {
       <div className="panel">
         <div className="panel-head">
           <h3>توزيع الربح التشغيلي على الشراكة</h3>
-          <span className="panel-sub">بعد خصم تكلفة البضاعة والتسويق والخسائر وعمولات المسوّقين وضريبة 5% ورسوم بوابة الدفع والمصروفات</span>
+          <span className="panel-sub">بعد خصم كل المصاريف والضريبة — والمسحوب من سجل «سحوبات الشركاء» في تبويب الحسابات</span>
         </div>
         <div className="split-row">
           <div className="split-card">
             <span>تطوير المشروع ({devPercent}%)</span>
             <strong>{fmt(devShare)} ر.ع</strong>
           </div>
-          {partners.map((p) => (
+          {partnerRows.map((p) => (
             <div className="split-card" key={p.id}>
               <span>{p.name} ({p.percent}% من الباقي)</span>
-              <strong>{fmt(remaining * ((Number(p.percent) || 0) / 100))} ر.ع</strong>
+              <strong>{fmt(p.share)} ر.ع</strong>
+              <small>مسحوب: {fmt(p.drawn)} · المتبقي: {fmt(p.share - p.drawn)}{p.capital > 0 ? ` · رأس مال مودَع: ${fmt(p.capital)}` : ""}</small>
             </div>
           ))}
         </div>
         <div className="branding-note">
-          إجمالي استثمار التأسيس/البراند حتى الآن: <strong>{fmt(totals.totalBranding)} ر.ع</strong> — وإجمالي المعدات والأصول الثابتة (المعاد استخدامها): <strong>{fmt(totals.totalEquipmentAssets)} ر.ع</strong> — الاثنين منفصلين تمامًا، يُستردّون تدريجيًا من الأرباح ولا يدخلون بتكلفة الوحدة. أما المستلزمات الاستهلاكية المرتبطة بالتصنيع (كمامات، قفازات...) فتُضاف كمواد بالمخزون وتدخل ضمن وصفة المنتج، فتنعكس تلقائيًا على تكلفة الوحدة وتكلفة البضاعة المباعة أعلاه.
+          إجمالي استثمار التأسيس/البراند بالفترة: <strong>{fmt(totals.totalBranding)} ر.ع</strong> — وإجمالي المعدات والأصول الثابتة المشتراة بالفترة: <strong>{fmt(totals.totalEquipmentAssets)} ر.ع</strong>. المستلزمات الاستهلاكية المرتبطة بالتصنيع (كمامات، قفازات...) تُضاف كمواد بالمخزون وتدخل ضمن وصفة المنتج فتنعكس على تكلفة الوحدة.
         </div>
       </div>
 
@@ -1343,7 +1634,7 @@ function emptyMaterial() {
 }
 function emptyPurchase(nextNo) {
   return {
-    id: uid("pur"), number: nextNo, date: todayStr(), note: "",
+    id: uid("pur"), number: nextNo, date: todayStr(), note: "", paidFrom: "sohar", vatPaid: "",
     lines: [{ id: uid("pl"), materialId: "", qty: "", unitCost: "", currency: "OMR", supplierInvoiceNo: "", supplierName: "", lineNote: "" }],
     extraCosts: [],
     attachments: [],
@@ -1385,6 +1676,7 @@ function MaterialsTab({ data, persist, currentUser }) {
   function removePurchase(id) {
     const pur = data.purchases.find((p) => p.id === id);
     if (!pur) return;
+    if (isLocked(data, pur.date)) { alert(lockMsg(data)); return; }
     const res = recomputeMaterialsForPurchaseChange(data, pur, null);
     if (res.error) { alert(res.error); return; }
     setConfirmState({
@@ -1406,6 +1698,7 @@ function MaterialsTab({ data, persist, currentUser }) {
   function savePurchase(pur, pendingDeletes) {
     const oldPur = data.purchases.find((p) => p.id === pur.id);
     const isEdit = !!oldPur;
+    if (isLocked(data, pur.date) || (oldPur && isLocked(data, oldPur.date))) { alert(lockMsg(data)); return false; }
     const validLines = convertLinesToOMR(pur.lines.filter((l) => l.materialId && l.qty));
     const extraCosts = convertExtrasToOMR(pur.extraCosts);
     const allocated = allocatePurchaseLines(validLines, extraCosts);
@@ -1664,6 +1957,10 @@ function PurchaseEditor({ purchase, materials, onSave, onClose, isEdit }) {
           <div className="form-row">
             <Field label="التاريخ"><input type="date" value={pur.date} onChange={(e) => set("date", e.target.value)} /></Field>
             <Field label="ملاحظة (مثال: رحلة مسقط لجلب المواد)"><input value={pur.note} onChange={(e) => set("note", e.target.value)} /></Field>
+          </div>
+          <div className="form-row">
+            <PaidFromField value={pur.paidFrom} onChange={(v) => set("paidFrom", v)} />
+            <VatPaidField value={pur.vatPaid} onChange={(v) => set("vatPaid", v)} />
           </div>
 
           <div className="sub-head">المواد المشتراة</div>
@@ -2320,9 +2617,12 @@ function InvoicesTab({ data, persist, currentUser }) {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [q, setQ] = useState("");
+  const [voiding, setVoiding] = useState(null);
+  const [showVoided, setShowVoided] = useState(true);
   const methods = data.settings.paymentMethods || [];
+  const guard = (date) => { if (isLocked(data, date)) { alert(lockMsg(data)); return true; } return false; };
 
-  function startNew() { setEditing(emptyInvoice(data.nextInvoiceNo, methods[0])); }
+  function startNew() { if (guard(todayStr())) return; setEditing(emptyInvoice(data.nextInvoiceNo, methods[0])); }
 
   function applyOverheadStockDelta(materials, oldUsage, newUsage) {
     // add back old quantities, then deduct new quantities
@@ -2339,6 +2639,7 @@ function InvoicesTab({ data, persist, currentUser }) {
   function save(inv) {
     const existing = data.invoices.find((x) => x.id === inv.id);
     const exists = !!existing;
+    if (guard(inv.date) || (existing && guard(existing.date))) return;
     const invoices = exists ? data.invoices.map((x) => (x.id === inv.id ? inv : x)) : [...data.invoices, { ...inv, createdBy: currentUser?.name }];
     const nextInvoiceNo = exists ? data.nextInvoiceNo : data.nextInvoiceNo + 1;
     const materials = applyOverheadStockDelta(data.materials, existing?.overheadUsage, inv.overheadUsage);
@@ -2347,23 +2648,42 @@ function InvoicesTab({ data, persist, currentUser }) {
   }
   function remove(id) {
     const inv = data.invoices.find((x) => x.id === id);
+    if (inv && guard(inv.date)) return;
     setConfirmState({
-      message: "تأكيد حذف الفاتورة؟",
+      message: "تأكيد حذف الفاتورة نهائيًا؟ (الأفضل تستخدم «إلغاء / مرتجع» عشان يبقى لها أثر بالسجل. الحذف النهائي للأخطاء فقط.)",
       onConfirm: () => {
-        const materials = applyOverheadStockDelta(data.materials, inv?.overheadUsage, []);
+        const materials = isVoid(inv) ? data.materials : applyOverheadStockDelta(data.materials, inv?.overheadUsage, []);
         persist({ ...data, invoices: data.invoices.filter((i) => i.id !== id), materials });
+      },
+    });
+  }
+  function startVoid(inv) { if (guard(inv.date)) return; setVoiding(inv); }
+  function confirmVoid(inv, v) {
+    const materials = applyOverheadStockDelta(data.materials, inv.overheadUsage, []);
+    persist({ ...data, materials, invoices: data.invoices.map((i) => (i.id === inv.id ? { ...i, void: { ...v, by: currentUser?.name, at: new Date().toISOString() } } : i)) });
+    setVoiding(null);
+  }
+  function unvoid(inv) {
+    if (guard(inv.date)) return;
+    setConfirmState({
+      message: "إعادة تفعيل الفاتورة؟ بترجع تدخل الإيراد والمخزون من جديد، وينشال تسجيل المرتجع من الحسابات.",
+      onConfirm: () => {
+        const materials = applyOverheadStockDelta(data.materials, [], inv.overheadUsage);
+        persist({ ...data, materials, invoices: data.invoices.map((i) => { if (i.id !== inv.id) return i; const { void: _v, ...rest } = i; return rest; }) });
       },
     });
   }
   function invoiceTotal(inv) { return invoiceComputed(inv).totalPaid; }
 
   const qn = q.trim().toLowerCase();
-  const filtered = data.invoices.filter((inv) => (!dateFrom || inv.date >= dateFrom) && (!dateTo || inv.date <= dateTo)
+  const filtered = data.invoices.filter((inv) => (showVoided || !isVoid(inv)) && (!dateFrom || inv.date >= dateFrom) && (!dateTo || inv.date <= dateTo)
     && (!qn || String(inv.number).includes(qn) || (inv.customerName || "").toLowerCase().includes(qn) || (inv.customerPhone || "").includes(qn)));
   const isFiltering = dateFrom || dateTo;
-  const periodTotal = filtered.reduce((s, inv) => s + invoiceTotal(inv), 0);
+  const liveFiltered = filtered.filter((inv) => !isVoid(inv));
+  const voidedCount = data.invoices.filter(isVoid).length;
+  const periodTotal = liveFiltered.reduce((s, inv) => s + invoiceTotal(inv), 0);
   const byMethod = {};
-  filtered.forEach((inv) => {
+  liveFiltered.forEach((inv) => {
     const m = inv.paymentMethod || "بدون طريقة دفع";
     byMethod[m] = (byMethod[m] || 0) + invoiceTotal(inv);
   });
@@ -2389,12 +2709,17 @@ function InvoicesTab({ data, persist, currentUser }) {
                 <button className="btn-ghost" onClick={() => { setDateFrom(""); setDateTo(""); setQ(""); }}>مسح الفلتر</button>
               </div>
             )}
+            {voidedCount > 0 && (
+              <div style={{ display: "flex", alignItems: "flex-end" }}>
+                <label className="check-inline"><input type="checkbox" checked={showVoided} onChange={(e) => setShowVoided(e.target.checked)} /> إظهار الملغاة ({voidedCount})</label>
+              </div>
+            )}
           </div>
 
           {isFiltering && (
             <>
               <div className="calc-summary">
-                <div><span>عدد الفواتير بالفترة</span><strong>{filtered.length}</strong></div>
+                <div><span>عدد الفواتير بالفترة (بدون الملغاة)</span><strong>{liveFiltered.length}</strong></div>
                 <div><span>إجمالي الفترة</span><strong>{fmt(periodTotal)} ر.ع</strong></div>
               </div>
               <div className="mini-list" style={{ marginTop: 12 }}>
@@ -2406,7 +2731,7 @@ function InvoicesTab({ data, persist, currentUser }) {
                   </div>
                 ))}
               </div>
-              <button className="btn-ghost" style={{ marginTop: 12 }} onClick={() => printPeriodNow({ dateFrom, dateTo, invoices: filtered, total: periodTotal, byMethod }, data)}>
+              <button className="btn-ghost" style={{ marginTop: 12 }} onClick={() => printPeriodNow({ dateFrom, dateTo, invoices: liveFiltered, total: periodTotal, byMethod }, data)}>
                 <Printer size={15} /> طباعة كشف الفترة
               </button>
             </>
@@ -2423,10 +2748,11 @@ function InvoicesTab({ data, persist, currentUser }) {
       ) : (
         <div className="invoice-list">
           {[...filtered].reverse().map((inv) => (
-            <div className="ticket" key={inv.id}>
+            <div className={`ticket ${isVoid(inv) ? "ticket-void" : ""}`} key={inv.id}>
               <div className="ticket-main">
                 <div className="ticket-top">
                   <span className="ticket-no">فاتورة #{inv.number}</span>
+                  {isVoid(inv) && <span className="badge red">ملغاة / مرتجع</span>}
                   <span className="ticket-date">{inv.date}</span>
                   {inv.paymentMethod && <span className="badge blue">{inv.paymentMethod}</span>}
                   {inv.deliveryType === "delivery" && <span className="badge amber">توصيل</span>}
@@ -2442,11 +2768,19 @@ function InvoicesTab({ data, persist, currentUser }) {
               </div>
               <div className="ticket-side">
                 <div className="ticket-total">{fmt(invoiceTotal(inv))} ر.ع</div>
+                {isVoid(inv) && <div className="panel-sub">{inv.void.date}{inv.void.reason ? ` — ${inv.void.reason}` : ""}{voidRefund(inv) > 0 ? ` — رُدّ ${fmt(voidRefund(inv))} ر.ع` : ""}</div>}
                 <div className="ticket-actions">
                   <button className="icon-btn" onClick={() => printInvoiceNow(inv, data, "ar")} title="طباعة عربي"><Printer size={15} /> AR</button>
                   <button className="icon-btn" onClick={() => printInvoiceNow(inv, data, "en")} title="Print English"><Printer size={15} /> EN</button>
-                  <button className="icon-btn" onClick={() => setEditing(inv)}>تعديل</button>
-                  <button className="icon-btn danger" onClick={() => remove(inv.id)}><Trash2 size={15} /></button>
+                  {isVoid(inv) ? (
+                    <button className="icon-btn" onClick={() => unvoid(inv)}>إعادة تفعيل</button>
+                  ) : (
+                    <>
+                      <button className="icon-btn" onClick={() => { if (!guard(inv.date)) setEditing(inv); }}>تعديل</button>
+                      <button className="icon-btn warn" onClick={() => startVoid(inv)}>إلغاء / مرتجع</button>
+                    </>
+                  )}
+                  <button className="icon-btn danger" onClick={() => remove(inv.id)} title="حذف نهائي"><Trash2 size={15} /></button>
                 </div>
               </div>
             </div>
@@ -2454,8 +2788,49 @@ function InvoicesTab({ data, persist, currentUser }) {
         </div>
       )}
 
-      {editing && <InvoiceEditor invoice={editing} data={data} products={data.products} methods={methods} allInvoices={data.invoices} onSave={save} onClose={() => setEditing(null)} />}
+      {editing && <InvoiceEditor invoice={editing} data={activeData(data)} products={data.products} methods={methods} allInvoices={data.invoices} onSave={save} onClose={() => setEditing(null)} />}
+      {voiding && <VoidModal invoice={voiding} data={data} onCancel={() => setVoiding(null)} onConfirm={(v) => confirmVoid(voiding, v)} />}
       <ConfirmModal state={confirmState} onCancel={() => setConfirmState(null)} />
+    </div>
+  );
+}
+
+function VoidModal({ invoice, data, onCancel, onConfirm }) {
+  const total = invoiceComputed(invoice).totalPaid;
+  const defAcc = methodAccount(data.settings, invoice.paymentMethod);
+  const [reason, setReason] = useState("");
+  const [refunded, setRefunded] = useState(!!defAcc);
+  const [amount, setAmount] = useState(String(Number(total.toFixed(3))));
+  const [account, setAccount] = useState(defAcc && defAcc !== "thawani" ? defAcc : (defAcc === "thawani" ? "thawani" : "sohar"));
+  const [date, setDate] = useState(muscatDate(new Date().toISOString()));
+  const amt = Number(amount);
+  const bad = !date || (refunded && (!(amt > 0) || amt > total + 0.0005));
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div className="modal" style={{ maxWidth: 520 }} onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head"><h3>إلغاء / مرتجع — فاتورة #{invoice.number}</h3><button className="icon-btn" onClick={onCancel}><X size={18} /></button></div>
+        <div className="modal-body">
+          <p className="field-hint" style={{ marginBottom: 10 }}>الفاتورة تبقى محفوظة بالسجل، لكن تطلع من الإيراد والضريبة والعمولة، ويرجع المخزون تلقائيًا (والمواد المستهلكة بالفاتورة لو فيه).</p>
+          <div className="form-row">
+            <Field label="تاريخ الإلغاء"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+            <Field label="السبب"><input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="مثال: العميل ألغى الطلب" /></Field>
+          </div>
+          <label className="check-inline" style={{ margin: "6px 0 10px" }}>
+            <input type="checkbox" checked={refunded} onChange={(e) => setRefunded(e.target.checked)} /> تم رد مبلغ للعميل (أو المبلغ كان مستلم وبينرد)
+          </label>
+          {refunded && (
+            <div className="form-row">
+              <Field label="المبلغ المردود (ر.ع)" hint={`الفاتورة ${fmt(total)} ر.ع شامل الشحن`}><input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
+              <Field label="انرد من حساب"><select value={account} onChange={(e) => setAccount(e.target.value)}>{ACCOUNTS.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></Field>
+            </div>
+          )}
+          {!refunded && <p className="field-hint">بدون رد مبلغ: الفاتورة بتختفي من الحسابات كأنها ما دخلت (مناسب لطلب ما انستلم له مبلغ).</p>}
+        </div>
+        <div className="modal-foot">
+          <button className="btn-ghost" onClick={onCancel}>رجوع</button>
+          <button className="btn-primary" disabled={bad} onClick={() => onConfirm({ date, reason: reason.trim(), refundAmount: refunded ? Number(amt.toFixed(3)) : 0, refundAccount: refunded ? account : "", refundDate: date })}>تأكيد الإلغاء</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -3373,14 +3748,17 @@ function vatQuarterData(data, year, q) {
   const invs = data.invoices
     .filter((i) => months.includes(String(i.date || "").slice(0, 7)))
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.number || 0) - (b.number || 0)));
+  const inputs = inputVatItems(data).filter((x) => months.includes(String(x.date || "").slice(0, 7)));
   const byMonth = months.map((key) => {
     const list = invs.filter((i) => String(i.date).slice(0, 7) === key);
     const gross = list.reduce((s, i) => s + invoiceComputed(i).grandTotal, 0);
-    return { key, label: AR_MONTHS[Number(key.slice(5)) - 1], count: list.length, gross, vat: vatOf(gross), net: gross - vatOf(gross) };
+    const input = inputs.filter((x) => String(x.date || "").slice(0, 7) === key).reduce((a, x) => a + x.amount, 0);
+    return { key, label: AR_MONTHS[Number(key.slice(5)) - 1], count: list.length, gross, vat: vatOf(gross), net: gross - vatOf(gross), input };
   });
   const gross = byMonth.reduce((s, m) => s + m.gross, 0);
   const vat = byMonth.reduce((s, m) => s + m.vat, 0);
-  return { year, q, months, invs, byMonth, gross, vat, net: gross - vat };
+  const input = byMonth.reduce((s, m) => s + m.input, 0);
+  return { year, q, months, invs, byMonth, gross, vat, input, due: vat - input, inputs, net: gross - vat };
 }
 
 
@@ -3406,8 +3784,8 @@ function methodAccount(settings, method) {
 
 function txnEffects(t) {
   const a = Number(t.amount) || 0;
-  if (t.kind === "opening" || t.kind === "deposit") return [{ acc: t.account, amt: a }];
-  if (t.kind === "withdraw") return [{ acc: t.account, amt: -a }];
+  if (t.kind === "opening" || t.kind === "deposit" || t.kind === "capital") return [{ acc: t.account, amt: a }];
+  if (t.kind === "withdraw" || t.kind === "partner_draw") return [{ acc: t.account, amt: -a }];
   if (t.kind === "transfer") return [{ acc: t.account, amt: -a }, { acc: t.to, amt: a }];
   if (t.kind === "settlement") return [{ acc: "thawani", amt: -(Number(t.gross) || 0) }, { acc: "sohar", amt: Number(t.received) || 0 }];
   return [];
@@ -3440,6 +3818,7 @@ function shippingLedger(data, extraGross = 0) {
   [...data.invoices].sort((x, y) => String(x.date).localeCompare(String(y.date)) || (Number(x.number) || 0) - (Number(y.number) || 0)).forEach((inv) => {
     const acc = methodAccount(data.settings, inv.paymentMethod);
     if (!acc) return;
+    if (!countsInAccounts(inv)) return;
     if (since[acc] && String(inv.date) < since[acc]) return;
     const c = invoiceComputed(inv);
     let settled = true, date = inv.date, account = acc === "cash" ? "cash" : shipAcc;
@@ -3449,6 +3828,7 @@ function shippingLedger(data, extraGross = 0) {
       date = settled ? settleDateFor(cum) : "";
       account = shipAcc;
     }
+    if (isVoid(inv)) return; // الملغاة: ما يتسجل لها مصروف شحن
     if (!(c.shipping > 0)) return;
     const effective = date && date !== "قيد التسجيل" ? date : "";
     const deducted = settled && (!effective || !since[account] || effective >= since[account]);
@@ -3466,22 +3846,37 @@ function accountBalances(data) {
     const o = txns.filter((t) => t.kind === "opening" && t.account === a.id).sort((x, y) => String(y.date).localeCompare(String(x.date)))[0];
     if (o) bal[a.id] += Number(o.amount) || 0;
   });
+  let refunds = 0;
   data.invoices.forEach((inv) => {
     const acc = methodAccount(data.settings, inv.paymentMethod);
     if (!acc || !bal.hasOwnProperty(acc)) return;
+    if (!countsInAccounts(inv)) return;
     if (since[acc] && String(inv.date) < since[acc]) return;
     const g = invoiceComputed(inv).totalPaid || 0;
     sales[acc] += g; bal[acc] += g;
+    const rf = voidRefund(inv);
+    if (rf > 0) {
+      const ra = (inv.void && inv.void.refundAccount) || acc;
+      const rd = (inv.void && inv.void.refundDate) || inv.date;
+      if (bal.hasOwnProperty(ra) && !(since[ra] && String(rd) < since[ra])) { bal[ra] -= rf; refunds += rf; }
+    }
   });
   txns.filter((t) => t.kind !== "opening").forEach((t) => txnEffects(t).forEach((e) => { if (bal.hasOwnProperty(e.acc)) bal[e.acc] += e.amt; }));
   // المصروفات اليدوية + مصاريف الشحن التلقائية المخصومة
   const manual = (data.expenses || []);
   manual.forEach((x) => { if (bal.hasOwnProperty(x.account)) bal[x.account] -= Number(x.amount) || 0; });
+  // مشتريات / تسويق / معدات / تأسيس المربوطة بحساب
+  let linked = 0;
+  linkedOutflows(data).forEach((o) => {
+    if (!bal.hasOwnProperty(o.account)) return;
+    if (since[o.account] && String(o.date) < since[o.account]) return;
+    bal[o.account] -= o.amount; linked += o.amount;
+  });
   const ship = shippingLedger(data);
   let shipOut = 0, shipPending = 0;
   ship.forEach((r) => { if (r.deducted) { bal[r.account] -= r.amount; shipOut += r.amount; } else if (!r.settled) shipPending += r.amount; });
   const fees = txns.filter((t) => t.kind === "settlement").reduce((sum, t) => sum + settlementFee(t), 0);
-  return { bal, sales, since, fees, shipOut, shipPending };
+  return { bal, sales, since, fees, shipOut, shipPending, refunds, linked };
 }
 
 function AccountsTab({ data, persist, currentUser }) {
@@ -3495,7 +3890,11 @@ function AccountsTab({ data, persist, currentUser }) {
   const methods = data.settings.paymentMethods || [];
 
   function add(t) { persist({ ...data, bankTxns: [...txns, { id: uid("bt"), createdBy: currentUser?.name, ...t }] }); }
-  function remove(id) { persist({ ...data, bankTxns: txns.filter((t) => t.id !== id) }); }
+  function remove(id) {
+    const t = txns.find((x) => x.id === id);
+    if (t && isLocked(data, t.date)) { alert(lockMsg(data)); return; }
+    persist({ ...data, bankTxns: txns.filter((x) => x.id !== id) });
+  }
   function saveOpening() {
     if (open.amount === "" || !open.date) return;
     const rest = txns.filter((t) => !(t.kind === "opening" && t.account === open.account));
@@ -3525,12 +3924,23 @@ function AccountsTab({ data, persist, currentUser }) {
     const add2 = ["ثواني - POS", "ثواني - رابط دفع", "تحويل بنكي - صحار"].filter((x) => !cur.includes(x));
     if (add2.length) persist({ ...data, settings: { ...data.settings, paymentMethods: [...cur, ...add2] } });
   }
-  const KIND = { opening: "رصيد افتتاحي", deposit: "إيداع", withdraw: "سحب / مصروف", transfer: "تحويل بين حسابين", settlement: "تسوية ثواني" };
+  const KIND = { opening: "رصيد افتتاحي", deposit: "إيداع", withdraw: "سحب / مصروف", transfer: "تحويل بين حسابين", settlement: "تسوية ثواني", partner_draw: "سحب شريك", capital: "رأس مال شريك" };
+  const partners = data.settings.partners || [];
+  const [pt, setPt] = useState({ kind: "partner_draw", partnerId: (partners[0] || {}).id || "", account: "sohar", amount: "", date: today, note: "" });
+  const ptBad = !pt.partnerId || !(Number(pt.amount) > 0) || !pt.date;
+  function savePartnerTxn() {
+    if (ptBad) return;
+    add({ kind: pt.kind, partnerId: pt.partnerId, account: pt.account, amount: Number(pt.amount), date: pt.date, note: pt.note });
+    setPt({ ...pt, amount: "", note: "" });
+  }
+  const partnerName = (id) => (partners.find((p) => p.id === id) || {}).name || "—";
+  const linked = useMemo(() => linkedOutflows(data).filter((o) => !(info.since[o.account] && String(o.date) < info.since[o.account])).sort((a, b) => String(b.date).localeCompare(String(a.date))), [data, info]);
+  const refundedInv = data.invoices.filter((i) => voidRefund(i) > 0);
   const stmtDiff = stmt === "" ? null : Number(stmt) - info.bal.sohar;
 
   return (
     <div className="page">
-      <PageHead eyebrow="الحسابات" title="الحسابات: بنك صحار · الكاش · ثواني" desc="الرصيد يتحسب تلقائيًا: الافتتاحي + المبيعات + الإيداعات − السحوبات − المصروفات (ومنها الشحن). ثواني تحوّل لصحار بعد يومين، وفرق التحويل = رسوم تنخصم من الربح." />
+      <PageHead eyebrow="الحسابات" title="الحسابات والشركاء: بنك صحار · الكاش · ثواني" desc="الرصيد يتحسب تلقائيًا: الافتتاحي + المبيعات + الإيداعات − السحوبات − المصروفات (ومنها الشحن). ثواني تحوّل لصحار بعد يومين، وفرق التحويل = رسوم تنخصم من الربح." />
 
       <div className="kpi-row">
         {ACCOUNTS.map((a) => (
@@ -3545,6 +3955,16 @@ function AccountsTab({ data, persist, currentUser }) {
           <div className="kpi-label">إجمالي رسوم ثواني</div>
           <div className="kpi-value">{fmt(info.fees)} <span className="unit">ر.ع</span></div>
         </div>
+        <div className="kpi-card" style={{ "--accent": "#5C6A63" }}>
+          <div className="kpi-label">مشتريات وتسويق ومعدات مخصومة</div>
+          <div className="kpi-value">{fmt(info.linked)} <span className="unit">ر.ع</span></div>
+        </div>
+        {info.refunds > 0 && (
+          <div className="kpi-card" style={{ "--accent": "var(--danger)" }}>
+            <div className="kpi-label">مرتجعات مردودة للعملاء</div>
+            <div className="kpi-value">{fmt(info.refunds)} <span className="unit">ر.ع</span></div>
+          </div>
+        )}
         <div className="kpi-card" style={{ "--accent": "#3D6B8C" }}>
           <div className="kpi-label">شحن مخصوم من الحسابات</div>
           <div className="kpi-value">{fmt(info.shipOut)} <span className="unit">ر.ع</span></div>
@@ -3577,7 +3997,7 @@ function AccountsTab({ data, persist, currentUser }) {
       </div>
 
       <div className="panel">
-        <div className="panel-head"><h3>3) حركة يدوية (إيداع / سحب / تحويل)</h3><span className="panel-sub">مشتريات ومصاريف ما تنخصم تلقائيًا من الحسابات — سجّلها هنا كسحب.</span></div>
+        <div className="panel-head"><h3>3) حركة يدوية (إيداع / سحب / تحويل)</h3><span className="panel-sub">المشتريات والتسويق والمعدات والمصروفات تنخصم لحالها من خاناتها («مدفوع من حساب»). هنا للحركات الأخرى فقط.</span></div>
         <div className="form-row four">
           <Field label="النوع"><select value={mv.kind} onChange={(e) => setMv({ ...mv, kind: e.target.value })}><option value="deposit">إيداع</option><option value="withdraw">سحب / مصروف</option><option value="transfer">تحويل بين حسابين</option></select></Field>
           <Field label={mv.kind === "transfer" ? "من حساب" : "الحساب"}><select value={mv.account} onChange={(e) => setMv({ ...mv, account: e.target.value })}>{ACCOUNTS.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></Field>
@@ -3587,6 +4007,19 @@ function AccountsTab({ data, persist, currentUser }) {
           <Field label="ملاحظة"><input value={mv.note} onChange={(e) => setMv({ ...mv, note: e.target.value })} /></Field>
         </div>
         <button className="btn-primary" onClick={saveMove} disabled={mvBad}><Plus size={16} /> إضافة</button>
+      </div>
+
+      <div className="panel">
+        <div className="panel-head"><h3>4) سحوبات الشركاء ورأس المال</h3><span className="panel-sub">سحب الشريك من أرباحه ينخصم من الحساب ويظهر «المتبقي» له في لوحة التحكم. ورأس المال المودَع يزيد الحساب.</span></div>
+        <div className="form-row four">
+          <Field label="النوع"><select value={pt.kind} onChange={(e) => setPt({ ...pt, kind: e.target.value })}><option value="partner_draw">سحب شريك (من الأرباح)</option><option value="capital">إيداع رأس مال</option></select></Field>
+          <Field label="الشريك"><select value={pt.partnerId} onChange={(e) => setPt({ ...pt, partnerId: e.target.value })}>{partners.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>
+          <Field label="الحساب"><select value={pt.account} onChange={(e) => setPt({ ...pt, account: e.target.value })}>{PAY_ACCOUNTS.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></Field>
+          <Field label="المبلغ (ر.ع)"><input type="number" value={pt.amount} onChange={(e) => setPt({ ...pt, amount: e.target.value })} /></Field>
+          <Field label="التاريخ"><input type="date" value={pt.date} onChange={(e) => setPt({ ...pt, date: e.target.value })} /></Field>
+          <Field label="ملاحظة"><input value={pt.note} onChange={(e) => setPt({ ...pt, note: e.target.value })} /></Field>
+        </div>
+        <button className="btn-primary" onClick={savePartnerTxn} disabled={ptBad}><Plus size={16} /> تسجيل</button>
       </div>
 
       <div className="panel">
@@ -3614,6 +4047,18 @@ function AccountsTab({ data, persist, currentUser }) {
         <p className="field-hint">تأكد إن تحويلات حسابات الشركاء الشخصية مضبوطة على «لا يدخل أي حساب» لو ما تبيها تدخل رصيد صحار.</p>
       </div>
 
+      {(linked.length > 0 || refundedInv.length > 0) && (
+        <div className="panel">
+          <div className="panel-head"><h3>حركات مربوطة تلقائيًا من التبويبات الأخرى</h3><span className="panel-sub">للاطلاع فقط — تعدّلها من تبويبها الأصلي</span></div>
+          <div className="table-wrap"><table>
+            <thead><tr><th>التاريخ</th><th>النوع</th><th>البيان</th><th>الحساب</th><th>المبلغ</th></tr></thead>
+            <tbody>
+              {linked.slice(0, 40).map((o) => (<tr key={o.kind + o.id}><td>{o.date}</td><td><span className="badge blue">{o.kind}</span></td><td>{o.title}</td><td>{accName(o.account)}</td><td className="num neg">− {fmt(o.amount)} ر.ع</td></tr>))}
+              {refundedInv.map((i) => (<tr key={"rf" + i.id}><td>{i.void.refundDate || i.void.date}</td><td><span className="badge red">مرتجع</span></td><td>فاتورة #{i.number} — {i.customerName || "عميل"}</td><td>{accName(i.void.refundAccount)}</td><td className="num neg">− {fmt(voidRefund(i))} ر.ع</td></tr>))}
+            </tbody></table></div>
+        </div>
+      )}
+
       <div className="panel">
         <div className="panel-head"><h3>سجل الحركات</h3></div>
         {txns.length === 0 ? <Empty icon={Wallet} title="ما فيه حركات" sub="ابدأ بالرصيد الافتتاحي فوق." /> : (
@@ -3622,7 +4067,7 @@ function AccountsTab({ data, persist, currentUser }) {
             <tbody>{[...txns].sort((a, b) => String(b.date).localeCompare(String(a.date))).map((t) => (
               <tr key={t.id}>
                 <td>{t.date}</td><td className="strong">{KIND[t.kind] || t.kind}</td>
-                <td>{t.kind === "settlement" ? "ثواني ← صحار" : t.kind === "transfer" ? `${accName(t.account)} ← ${accName(t.to)}` : accName(t.account)}</td>
+                <td>{t.kind === "settlement" ? "ثواني ← صحار" : t.kind === "transfer" ? `${accName(t.account)} ← ${accName(t.to)}` : accName(t.account)}{t.partnerId ? ` · ${partnerName(t.partnerId)}` : ""}</td>
                 <td className="num">{t.kind === "settlement" ? `${fmt(t.gross)} → ${fmt(t.received)}` : fmt(t.amount)}</td>
                 <td className="num">{t.kind === "settlement" ? fmt(settlementFee(t)) : "—"}</td>
                 <td>{t.note}</td>
@@ -3638,7 +4083,7 @@ function AccountsTab({ data, persist, currentUser }) {
 function ExpensesTab({ data, persist, currentUser }) {
   const list = data.expenses || [];
   const today = muscatDate(new Date().toISOString());
-  const empty = { date: today, title: "", amount: "", account: "sohar", invoiceNo: "", note: "" };
+  const empty = { date: today, title: "", amount: "", account: "sohar", invoiceNo: "", note: "", vat: "" };
   const [form, setForm] = useState(empty);
   const ship = useMemo(() => shippingLedger(data), [data]);
   const totalManual = list.reduce((sum, x) => sum + (Number(x.amount) || 0), 0);
@@ -3647,10 +4092,15 @@ function ExpensesTab({ data, persist, currentUser }) {
   const bad = !form.title.trim() || !(Number(form.amount) > 0) || !form.date;
   function save() {
     if (bad) return;
+    if (isLocked(data, form.date)) { alert(lockMsg(data)); return; }
     persist({ ...data, expenses: [...list, { id: uid("ex"), ...form, title: form.title.trim(), amount: Number(form.amount), createdBy: currentUser?.name }] });
     setForm({ ...empty, account: form.account });
   }
-  function remove(id) { persist({ ...data, expenses: list.filter((x) => x.id !== id) }); }
+  function remove(id) {
+    const x = list.find((y) => y.id === id);
+    if (x && isLocked(data, x.date)) { alert(lockMsg(data)); return; }
+    persist({ ...data, expenses: list.filter((y) => y.id !== id) });
+  }
   const rows = [
     ...list.map((x) => ({ key: x.id, date: x.date, title: x.title, invoice: x.invoiceNo ? `#${x.invoiceNo}` : "", amount: x.amount, account: accName(x.account), kind: "يدوي", status: "مخصوم", id: x.id })),
     ...ship.map((r) => ({ key: "ship_" + r.id, date: r.date || r.invDate, title: `مصروف شحن — فاتورة #${r.invoiceNo}${r.webNo ? ` (${r.webNo})` : ""}`, invoice: `#${r.invoiceNo}`, amount: r.amount, account: accName(r.account), kind: "شحن تلقائي", status: r.deducted ? "مخصوم" : r.settled ? "قبل تاريخ الافتتاحي" : "بانتظار تسوية ثواني" })),
@@ -3672,6 +4122,7 @@ function ExpensesTab({ data, persist, currentUser }) {
           <Field label="التاريخ"><input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
           <Field label="رقم فاتورة (اختياري)"><input value={form.invoiceNo} onChange={(e) => setForm({ ...form, invoiceNo: e.target.value })} /></Field>
           <Field label="ملاحظة"><input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></Field>
+          <VatPaidField value={form.vat} onChange={(v) => setForm({ ...form, vat: v })} />
         </div>
         <button className="btn-primary" onClick={save} disabled={bad}><Plus size={16} /> إضافة المصروف</button>
       </div>
@@ -3710,6 +4161,8 @@ function VatTab({ data }) {
       lines.push([i.number, i.date, i.customerName || "", g.toFixed(3), (g - vatOf(g)).toFixed(3), vatOf(g).toFixed(3)]);
     });
     lines.push(["", "", "الإجمالي", d.gross.toFixed(3), d.net.toFixed(3), d.vat.toFixed(3)]);
+    lines.push(["", "", "ضريبة المشتريات (تُخصم)", "", "", d.input.toFixed(3)]);
+    lines.push(["", "", "صافي الضريبة المستحقة", "", "", d.due.toFixed(3)]);
     const csv = "﻿" + lines.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const a = document.createElement("a");
@@ -3741,9 +4194,11 @@ function VatTab({ data }) {
           ${monthRows}
           <div class="totals-row"><span>المبيعات قبل الضريبة</span><span><bdi>${fmt(d.net)} ر.ع</bdi></span></div>
           <div class="totals-row"><span>إجمالي المبيعات شامل الضريبة</span><span><bdi>${fmt(d.gross)} ر.ع</bdi></span></div>
-          <div class="grand-total"><span>الضريبة المستحقة ${VAT_RATE}%</span><span><bdi>${fmt(d.vat)} ر.ع</bdi></span></div>
+          <div class="totals-row"><span>ضريبة المبيعات ${VAT_RATE}%</span><span><bdi>${fmt(d.vat)} ر.ع</bdi></span></div>
+          <div class="totals-row"><span>ضريبة المشتريات (تُخصم)</span><span><bdi>${fmt(d.input)} ر.ع</bdi></span></div>
+          <div class="grand-total"><span>صافي الضريبة المستحقة</span><span><bdi>${fmt(d.due)} ر.ع</bdi></span></div>
         </div></div>
-        <div class="foot"><div class="foot-note">الأسعار محسوبة شاملة الضريبة (الضريبة = المبلغ × ${VAT_RATE} ÷ ${100 + VAT_RATE}). كشف مستخرج من فواتير البيع، ولا يشمل ضريبة المشتريات. يُراجع مع محاسب قبل أي تقديم رسمي.</div></div>
+        <div class="foot"><div class="foot-note">الأسعار محسوبة شاملة الضريبة (الضريبة = المبلغ × ${VAT_RATE} ÷ ${100 + VAT_RATE}). كشف مستخرج من فواتير البيع، وضريبة المشتريات هي المبالغ اللي سجّلتها يدويًا بخانة «منها ضريبة 5%». يُراجع مع محاسب قبل أي تقديم رسمي.</div></div>
       </div>`;
     openPrintWindow("ar", html);
   }
@@ -3753,7 +4208,7 @@ function VatTab({ data }) {
       <PageHead
         eyebrow="المالية"
         title="الإقرار الضريبي (5%)"
-        desc="كشف ربع سنوي بالضريبة المستخرجة من مبيعاتك (الأسعار محسوبة شاملة الضريبة). نفس المبلغ ينخصم تلقائيًا من الربح في لوحة التحكم، عشان تكون محجوزة لو انطلبت منك."
+        desc="كشف ربع سنوي بالضريبة المستخرجة من مبيعاتك (الأسعار محسوبة شاملة الضريبة). نفس الصافي ينخصم تلقائيًا من الربح في لوحة التحكم، عشان يكون محجوز لو انطلب منك. الفواتير الملغاة ما تدخل الكشف."
       />
       <div className="panel">
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
@@ -3768,7 +4223,9 @@ function VatTab({ data }) {
         <div className="kpi-row">
           <div className="kpi-card"><div className="kpi-label">مبيعات {range} (شامل الضريبة)</div><div className="kpi-value">{fmt(d.gross)} <span className="unit">ر.ع</span></div></div>
           <div className="kpi-card"><div className="kpi-label">المبيعات قبل الضريبة</div><div className="kpi-value">{fmt(d.net)} <span className="unit">ر.ع</span></div></div>
-          <div className="kpi-card" style={{ "--accent": "#6B4C8C" }}><div className="kpi-label">الضريبة المستحقة {VAT_RATE}%</div><div className="kpi-value">{fmt(d.vat)} <span className="unit">ر.ع</span></div></div>
+          <div className="kpi-card" style={{ "--accent": "#6B4C8C" }}><div className="kpi-label">ضريبة المبيعات {VAT_RATE}%</div><div className="kpi-value">{fmt(d.vat)} <span className="unit">ر.ع</span></div></div>
+          <div className="kpi-card" style={{ "--accent": "#3D6B8C" }}><div className="kpi-label">ضريبة المشتريات (تُخصم)</div><div className="kpi-value">{fmt(d.input)} <span className="unit">ر.ع</span></div></div>
+          <div className="kpi-card" style={{ "--accent": "#B3452F" }}><div className="kpi-label">صافي الضريبة المستحقة</div><div className="kpi-value">{fmt(d.due)} <span className="unit">ر.ع</span></div></div>
         </div>
       </div>
 
@@ -3776,12 +4233,12 @@ function VatTab({ data }) {
         <div className="panel-head"><h3>الأرباع الأربعة لسنة {year}</h3></div>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>الربع</th><th>الفواتير</th><th>المبيعات شامل الضريبة</th><th>الضريبة المستحقة</th></tr></thead>
+            <thead><tr><th>الربع</th><th>الفواتير</th><th>المبيعات شامل الضريبة</th><th>ضريبة المبيعات</th><th>ضريبة المشتريات</th><th>الصافي المستحق</th></tr></thead>
             <tbody>
               {all.map((x) => (
-                <tr key={x.q}><td>الربع {x.q} ({AR_MONTHS[(x.q - 1) * 3]} – {AR_MONTHS[(x.q - 1) * 3 + 2]})</td><td className="num">{x.invs.length}</td><td className="num">{fmt(x.gross)}</td><td className="num"><strong>{fmt(x.vat)}</strong></td></tr>
+                <tr key={x.q}><td>الربع {x.q} ({AR_MONTHS[(x.q - 1) * 3]} – {AR_MONTHS[(x.q - 1) * 3 + 2]})</td><td className="num">{x.invs.length}</td><td className="num">{fmt(x.gross)}</td><td className="num">{fmt(x.vat)}</td><td className="num">{fmt(x.input)}</td><td className="num"><strong>{fmt(x.due)}</strong></td></tr>
               ))}
-              <tr style={{ fontWeight: 700 }}><td>السنة</td><td className="num">{all.reduce((s, x) => s + x.invs.length, 0)}</td><td className="num">{fmt(all.reduce((s, x) => s + x.gross, 0))}</td><td className="num">{fmt(all.reduce((s, x) => s + x.vat, 0))}</td></tr>
+              <tr style={{ fontWeight: 700 }}><td>السنة</td><td className="num">{all.reduce((s, x) => s + x.invs.length, 0)}</td><td className="num">{fmt(all.reduce((s, x) => s + x.gross, 0))}</td><td className="num">{fmt(all.reduce((s, x) => s + x.vat, 0))}</td><td className="num">{fmt(all.reduce((s, x) => s + x.input, 0))}</td><td className="num">{fmt(all.reduce((s, x) => s + x.due, 0))}</td></tr>
             </tbody>
           </table>
         </div>
@@ -3791,15 +4248,15 @@ function VatTab({ data }) {
         <div className="panel-head"><h3>فواتير {range}</h3><span className="panel-sub">كل شهر لحاله</span></div>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>الشهر</th><th>الفواتير</th><th>شامل الضريبة</th><th>قبل الضريبة</th><th>الضريبة</th></tr></thead>
+            <thead><tr><th>الشهر</th><th>الفواتير</th><th>شامل الضريبة</th><th>قبل الضريبة</th><th>ضريبة المبيعات</th><th>ضريبة المشتريات</th></tr></thead>
             <tbody>
               {d.byMonth.map((m) => (
-                <tr key={m.key}><td>{m.label}</td><td className="num">{m.count}</td><td className="num">{fmt(m.gross)}</td><td className="num">{fmt(m.net)}</td><td className="num"><strong>{fmt(m.vat)}</strong></td></tr>
+                <tr key={m.key}><td>{m.label}</td><td className="num">{m.count}</td><td className="num">{fmt(m.gross)}</td><td className="num">{fmt(m.net)}</td><td className="num"><strong>{fmt(m.vat)}</strong></td><td className="num">{fmt(m.input)}</td></tr>
               ))}
             </tbody>
           </table>
         </div>
-        <p style={{ margin: "10px 0 0", fontSize: 12, color: "var(--ink-soft)" }}>هذا كشف داخلي من فواتير البيع (بدون ضريبة المشتريات). راجعه مع محاسب قبل أي تقديم رسمي.</p>
+        <p style={{ margin: "10px 0 0", fontSize: 12, color: "var(--ink-soft)" }}>كشف داخلي: ضريبة المبيعات من الفواتير، وضريبة المشتريات من المبالغ اللي تسجلها بخانة «منها ضريبة 5%» (مشتريات، مصروفات، تسويق، معدات). راجعه مع محاسب قبل أي تقديم رسمي.</p>
       </div>
     </div>
   );
@@ -3918,13 +4375,14 @@ function CustomersTab({ data, persist }) {
 
 /* ============================== marketing ============================== */
 
-function emptyMarketing() { return { id: uid("mkt"), date: todayStr(), type: "campaign", title: "", cost: "", productId: "", qty: "" }; }
+function emptyMarketing() { return { id: uid("mkt"), date: todayStr(), type: "campaign", title: "", cost: "", productId: "", qty: "", paidFrom: "sohar", vat: "" }; }
 
 function MarketingTab({ data, persist, currentUser }) {
   const [form, setForm] = useState(emptyMarketing());
   function set(field, val) {
     const next = { ...form, [field]: val };
     if (field === "type" && val === "campaign") next.qty = "";
+    if (field === "type" && val === "sample") { next.paidFrom = ""; next.vat = ""; }
     if ((field === "productId" || field === "qty") && next.type === "sample") {
       const ref = productReferenceCost(data, next.productId);
       if (next.productId && next.qty) next.cost = (ref.unitCost * Number(next.qty)).toFixed(3);
@@ -3933,10 +4391,15 @@ function MarketingTab({ data, persist, currentUser }) {
   }
   function add() {
     if (!form.title.trim() || !form.cost) return;
+    if (isLocked(data, form.date)) { alert(lockMsg(data)); return; }
     persist({ ...data, marketing: [...data.marketing, { ...form, title: form.title.trim(), createdBy: currentUser?.name }] });
     setForm(emptyMarketing());
   }
-  function remove(id) { persist({ ...data, marketing: data.marketing.filter((m) => m.id !== id) }); }
+  function remove(id) {
+    const m = data.marketing.find((x) => x.id === id);
+    if (m && isLocked(data, m.date)) { alert(lockMsg(data)); return; }
+    persist({ ...data, marketing: data.marketing.filter((m2) => m2.id !== id) });
+  }
 
   const totalCampaigns = data.marketing.filter((m) => m.type === "campaign").reduce((s, m) => s + (Number(m.cost) || 0), 0);
   const totalSamples = data.marketing.filter((m) => m.type === "sample").reduce((s, m) => s + (Number(m.cost) || 0), 0);
@@ -3971,6 +4434,8 @@ function MarketingTab({ data, persist, currentUser }) {
             <input type="number" value={form.cost} onChange={(e) => set("cost", e.target.value)} />
           </Field>
           <Field label="التاريخ"><input type="date" value={form.date} onChange={(e) => set("date", e.target.value)} /></Field>
+          {form.type === "campaign" && <PaidFromField value={form.paidFrom} onChange={(v) => set("paidFrom", v)} />}
+          {form.type === "campaign" && <VatPaidField value={form.vat} onChange={(v) => set("vat", v)} />}
         </div>
         <button className="btn-primary" onClick={add} disabled={!form.title.trim() || !form.cost}><Plus size={16} /> إضافة</button>
       </div>
@@ -3991,7 +4456,7 @@ function MarketingTab({ data, persist, currentUser }) {
                     <td>{m.title}</td>
                     <td>{prod ? prod.name : "عام"}</td>
                     <td className="num">{m.qty || "—"}</td>
-                    <td className="num">{fmt(m.cost)} ر.ع</td>
+                    <td className="num">{fmt(m.cost)} ر.ع{m.paidFrom ? <div className="panel-sub">من {accName(m.paidFrom)}</div> : null}</td>
                     <td>{m.createdBy && <span className="badge green">{m.createdBy}</span>}</td>
                     <td><button className="icon-btn danger" onClick={() => remove(m.id)}><Trash2 size={14} /></button></td>
                   </tr>
@@ -4288,7 +4753,7 @@ function LossesTab({ data, persist, currentUser }) {
 
 /* ============================== equipment ============================== */
 
-function emptyEquipment() { return { id: uid("equip"), code: "", date: todayStr(), title: "", qty: 1, cost: "", note: "" }; }
+function emptyEquipment() { return { id: uid("equip"), code: "", date: todayStr(), title: "", qty: 1, cost: "", note: "", paidFrom: "sohar", vat: "", lifeMonths: "" }; }
 
 function EquipmentTab({ data, persist, currentUser }) {
   const [form, setForm] = useState({ ...emptyEquipment(), code: nextCode(data.equipment, "EQ-") });
@@ -4297,6 +4762,7 @@ function EquipmentTab({ data, persist, currentUser }) {
 
   function save() {
     if (!form.title.trim() || !form.cost) return;
+    if (isLocked(data, form.date)) { alert(lockMsg(data)); return; }
     if (editingId) {
       persist({ ...data, equipment: data.equipment.map((e) => (e.id === editingId ? { ...form, title: form.title.trim() } : e)) });
       setForm({ ...emptyEquipment(), code: nextCode(data.equipment, "EQ-") });
@@ -4311,6 +4777,8 @@ function EquipmentTab({ data, persist, currentUser }) {
   function startEdit(e) { setForm(e); setEditingId(e.id); }
   function cancelEdit() { setForm({ ...emptyEquipment(), code: nextCode(data.equipment, "EQ-") }); setEditingId(null); }
   function remove(id) {
+    const eq = data.equipment.find((x) => x.id === id);
+    if (eq && isLocked(data, eq.date)) { alert(lockMsg(data)); return; }
     setConfirmState({
       message: "تأكيد حذف هذا العنصر؟",
       onConfirm: () => persist({ ...data, equipment: data.equipment.filter((e) => e.id !== id) }),
@@ -4351,6 +4819,10 @@ function EquipmentTab({ data, persist, currentUser }) {
           <Field label="التكلفة الإجمالية (ر.ع)"><input type="number" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} /></Field>
           <Field label="التاريخ"><input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
         </div>
+        <div className="form-row four">
+          <PaidFromField value={form.paidFrom} onChange={(v) => setForm({ ...form, paidFrom: v })} />
+          <VatPaidField value={form.vat} onChange={(v) => setForm({ ...form, vat: v })} />
+        </div>
         <Field label="ملاحظات (اختياري)"><input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></Field>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn-primary" onClick={save} disabled={!form.title.trim() || !form.cost}>
@@ -4373,7 +4845,7 @@ function EquipmentTab({ data, persist, currentUser }) {
                   <td>{e.date}</td>
                   <td className="strong">{e.title}</td>
                   <td className="num">{e.qty || "—"}</td>
-                  <td className="num">{fmt(e.cost)} ر.ع</td>
+                  <td className="num">{fmt(e.cost)} ر.ع{e.paidFrom ? <div className="panel-sub">من {accName(e.paidFrom)}</div> : null}</td>
                   <td>{e.note}</td>
                   <td>{e.createdBy && <span className="badge green">{e.createdBy}</span>}</td>
                   <td>
@@ -4395,13 +4867,14 @@ function EquipmentTab({ data, persist, currentUser }) {
 
 /* ============================== branding ============================== */
 
-function emptyBranding() { return { id: uid("brand"), date: todayStr(), title: "", cost: "", note: "" }; }
+function emptyBranding() { return { id: uid("brand"), date: todayStr(), title: "", cost: "", note: "", paidFrom: "sohar", vat: "" }; }
 
 function BrandingTab({ data, persist, currentUser }) {
   const [form, setForm] = useState(emptyBranding());
   const [editingId, setEditingId] = useState(null);
   function save() {
     if (!form.title.trim() || !form.cost) return;
+    if (isLocked(data, form.date)) { alert(lockMsg(data)); return; }
     if (editingId) {
       persist({ ...data, branding: data.branding.map((b) => (b.id === editingId ? { ...form, title: form.title.trim() } : b)) });
     } else {
@@ -4412,7 +4885,11 @@ function BrandingTab({ data, persist, currentUser }) {
   }
   function startEdit(b) { setForm(b); setEditingId(b.id); }
   function cancelEdit() { setForm(emptyBranding()); setEditingId(null); }
-  function remove(id) { persist({ ...data, branding: data.branding.filter((b) => b.id !== id) }); }
+  function remove(id) {
+    const b = data.branding.find((x) => x.id === id);
+    if (b && isLocked(data, b.date)) { alert(lockMsg(data)); return; }
+    persist({ ...data, branding: data.branding.filter((x) => x.id !== id) });
+  }
   const total = data.branding.reduce((s, b) => s + (Number(b.cost) || 0), 0);
 
   return (
@@ -4429,6 +4906,8 @@ function BrandingTab({ data, persist, currentUser }) {
           <Field label="التكلفة (ر.ع)"><input type="number" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} /></Field>
           <Field label="التاريخ"><input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
           <Field label="ملاحظات"><input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></Field>
+          <PaidFromField value={form.paidFrom} onChange={(v) => setForm({ ...form, paidFrom: v })} />
+          <VatPaidField value={form.vat} onChange={(v) => setForm({ ...form, vat: v })} />
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn-primary" onClick={save} disabled={!form.title.trim() || !form.cost}>
@@ -4447,7 +4926,7 @@ function BrandingTab({ data, persist, currentUser }) {
             <tbody>
               {[...data.branding].reverse().map((b) => (
                 <tr key={b.id}>
-                  <td>{b.date}</td><td className="strong">{b.title}</td><td className="num">{fmt(b.cost)} ر.ع</td><td>{b.note}</td>
+                  <td>{b.date}</td><td className="strong">{b.title}</td><td className="num">{fmt(b.cost)} ر.ع{b.paidFrom ? <div className="panel-sub">من {accName(b.paidFrom)}</div> : null}</td><td>{b.note}</td>
                   <td>{b.createdBy && <span className="badge green">{b.createdBy}</span>}</td>
                   <td>
                     <div style={{ display: "flex", gap: 6 }}>
@@ -4474,6 +4953,7 @@ function SettingsTab({ data, persist, currentUser }) {
   const [confirmState, setConfirmState] = useState(null);
   const [backupDates, setBackupDates] = useState(null); // null = loading
   const [restoreMsg, setRestoreMsg] = useState("");
+  const [lockInput, setLockInput] = useState((data.settings && data.settings.lockedUntil) || "");
   function setSettings(next) { persist({ ...data, settings: next }); }
 
   useEffect(() => {
@@ -4487,7 +4967,7 @@ function SettingsTab({ data, persist, currentUser }) {
         setRestoreMsg("جاري الاستعادة...");
         try {
           const restored = await loadBackup(dateStr);
-          await persist(restored);
+          await persist({ ...restored, auditLog: [...(restored.auditLog || []), { id: uid("au"), at: new Date().toISOString(), by: currentUser?.name, kind: "restore", area: "استعادة نسخة", ref: dateStr }] }, { replace: true });
           setRestoreMsg(`تمت الاستعادة من نسخة ${dateStr} بنجاح ✅`);
         } catch {
           setRestoreMsg("صار خطأ أثناء الاستعادة، حاول مرة ثانية.");
@@ -4537,7 +5017,7 @@ function SettingsTab({ data, persist, currentUser }) {
         }
         setConfirmState({
           message: "استعادة هذي النسخة راح تستبدل كل البيانات الحالية بالكامل. متأكد؟",
-          onConfirm: () => { persist(parsed); setImportMsg("تمت الاستعادة بنجاح ✅"); },
+          onConfirm: () => { persist({ ...defaultAppData(), ...parsed, auditLog: [...(parsed.auditLog || []), { id: uid("au"), at: new Date().toISOString(), by: currentUser?.name, kind: "restore", area: "استعادة ملف", ref: "JSON" }] }, { replace: true }); setImportMsg("تمت الاستعادة بنجاح ✅"); },
         });
       } catch {
         setImportMsg("ما قدرنا نقرأ الملف، تأكد إنه ملف JSON صحيح.");
@@ -4611,6 +5091,20 @@ function SettingsTab({ data, persist, currentUser }) {
       </div>
 
       <div className="panel">
+        <div className="panel-head"><h3>إقفال الفترة المحاسبية</h3><span className="panel-sub">بعد تقديم الإقرار الضريبي أو إغلاق الشهر، اقفل لين تاريخ معيّن: ما أحد يقدر يضيف أو يعدّل أو يحذف فواتير ومصروفات ومشتريات بهالفترة.</span></div>
+        <div className="form-row four">
+          <Field label="مقفل لين تاريخ (شامل)" hint={s.lockedUntil ? `الإقفال الحالي: ${s.lockedUntil}` : "ما فيه إقفال حاليًا"}>
+            <input type="date" value={lockInput} onChange={(e) => setLockInput(e.target.value)} />
+          </Field>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="btn-primary" disabled={!lockInput} onClick={() => setSettings({ ...s, lockedUntil: lockInput })}>تطبيق الإقفال</button>
+          {s.lockedUntil && <button className="btn-ghost" onClick={() => { setSettings({ ...s, lockedUntil: "" }); setLockInput(""); }}>فتح الإقفال</button>}
+        </div>
+        <p className="field-hint" style={{ marginTop: 8 }}>طلبات الموقع الجديدة تنستورد دائمًا (هي مبيعات حقيقية). الإقفال يمنع فقط التعديل اليدوي. كل إقفال وفتح ينسجل في «سجل التعديلات».</p>
+      </div>
+
+      <div className="panel">
         <div className="panel-head"><h3>نسبة تطوير المشروع</h3><span className="panel-sub">من الربح التشغيلي الصافي، قبل توزيعه على الشركاء</span></div>
         <Field label="النسبة %"><input type="number" min="0" max="100" value={s.devPercent} onChange={(e) => setSettings({ ...s, devPercent: e.target.value })} style={{ maxWidth: 140 }} /></Field>
       </div>
@@ -4636,6 +5130,41 @@ function SettingsTab({ data, persist, currentUser }) {
         {partnersSum !== 100 && <p className="field-hint" style={{ color: "var(--copper)", marginTop: 6 }}>تنبيه: مجموع نسب الشركاء لازم يكون 100% عشان التوزيع يكون دقيق.</p>}
       </div>
       <ConfirmModal state={confirmState} onCancel={() => setConfirmState(null)} />
+    </div>
+  );
+}
+
+/* ============================== سجل التعديلات ============================== */
+
+const AUDIT_KIND = { add: ["إضافة", "green"], edit: ["تعديل", "blue"], delete: ["حذف", "red"], void: ["إلغاء / مرتجع", "red"], unvoid: ["إعادة تفعيل", "amber"], lock: ["إقفال", "amber"], restore: ["استعادة", "amber"] };
+
+function AuditTab({ data }) {
+  const log = data.auditLog || [];
+  const [area, setArea] = useState("");
+  const [kind, setKind] = useState("");
+  const [q, setQ] = useState("");
+  const areas = useMemo(() => [...new Set(log.map((x) => x.area))], [log]);
+  const qn = q.trim().toLowerCase();
+  const rows = useMemo(() => [...log].reverse().filter((x) => (!area || x.area === area) && (!kind || x.kind === kind) && (!qn || String(x.ref || "").toLowerCase().includes(qn) || String(x.by || "").toLowerCase().includes(qn))).slice(0, 400), [log, area, kind, qn]);
+  const fmtAt = (iso) => { try { return new Date(iso).toLocaleString("en-GB", { timeZone: "Asia/Muscat", hour12: false }).replace(",", ""); } catch (e) { return iso; } };
+  return (
+    <div className="page">
+      <PageHead eyebrow="النظام" title="سجل التعديلات" desc="كل إضافة وتعديل وحذف وإلغاء وإقفال ينسجل تلقائيًا: من سوّاه، ومتى. للرجوع له عند أي خلاف أو مراجعة محاسب. (آخر 1500 عملية)" />
+      <div className="panel">
+        <div className="form-row">
+          <Field label="القسم"><select value={area} onChange={(e) => setArea(e.target.value)}><option value="">الكل</option>{areas.map((a) => <option key={a} value={a}>{a}</option>)}</select></Field>
+          <Field label="نوع العملية"><select value={kind} onChange={(e) => setKind(e.target.value)}><option value="">الكل</option>{Object.entries(AUDIT_KIND).map(([k, v]) => <option key={k} value={k}>{v[0]}</option>)}</select></Field>
+          <Field label="بحث (بيان / اسم)"><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ابحث..." /></Field>
+        </div>
+      </div>
+      {rows.length === 0 ? <Empty icon={ShieldCheck} title="ما فيه سجل بعد" sub="العمليات الجاية تنسجل هنا تلقائيًا." /> : (
+        <div className="table-wrap"><table>
+          <thead><tr><th>الوقت (مسقط)</th><th>بواسطة</th><th>العملية</th><th>القسم</th><th>البيان</th><th>المبلغ</th></tr></thead>
+          <tbody>{rows.map((x) => {
+            const k = AUDIT_KIND[x.kind] || [x.kind, "blue"];
+            return (<tr key={x.id}><td className="num">{fmtAt(x.at)}</td><td>{x.by}</td><td><span className={`badge ${k[1]}`}>{k[0]}</span></td><td>{x.area}</td><td>{x.ref}</td><td className="num">{x.amount != null && x.amount !== "" ? `${fmt(x.amount)} ر.ع` : "—"}</td></tr>);
+          })}</tbody></table></div>
+      )}
     </div>
   );
 }
@@ -4668,6 +5197,29 @@ function Style() {
       .nav-item{ white-space:nowrap; flex-shrink:0; display:flex; align-items:center; gap:10px; padding:9px 10px; border-radius:8px; background:transparent; border:none; color:#C9D0C6; font-family:'Cairo'; font-size:13px; cursor:pointer; text-align:right; transition:background .15s; }
       .nav-item:hover{ background:rgba(255,255,255,.06); }
       .nav-item.active{ background:var(--teal); color:#fff; font-weight:600; }
+      .nav{ gap:2px; flex:1 1 auto; min-height:0; }
+      .nav-item{ padding:6px 10px !important; }
+      .sidebar{ gap:14px !important; padding:16px 14px !important; }
+      .sidebar-foot{ display:none !important; }
+      .nav-group{ display:flex; flex-direction:column; gap:2px; padding-bottom:6px; }
+      .nav-group + .nav-group{ border-top:1px solid rgba(255,255,255,.07); padding-top:8px; }
+      .nav-group-title{ font-size:10.5px; letter-spacing:.04em; color:#7D8A80; font-weight:700; padding:2px 10px 4px; }
+      .period-bar{ display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:4px 0 14px; }
+      .period-bar input[type=date]{ padding:6px 8px; border:1px solid var(--border); border-radius:8px; background:var(--surface); font-family:inherit; }
+      .chip-btn{ border:1px solid var(--border); background:var(--surface); color:var(--ink); border-radius:999px; padding:6px 14px; font-family:'Cairo'; font-size:12.5px; cursor:pointer; }
+      .chip-btn.on{ background:var(--teal); color:#fff; border-color:var(--teal); font-weight:700; }
+      .period-label{ margin-right:auto; font-size:12.5px; color:var(--ink-soft); }
+      .profit-hero{ display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; background:var(--surface); border:1px solid var(--border); border-right:5px solid var(--accent); border-radius:14px; padding:18px 22px; margin-bottom:16px; }
+      .profit-value{ font-size:34px; font-weight:800; color:var(--accent); line-height:1.2; }
+      .profit-value .unit{ font-size:14px; color:var(--ink-soft); font-weight:600; }
+      .profit-note{ font-size:12px; color:var(--ink-soft); max-width:440px; line-height:1.7; }
+      .kpi-group{ margin-bottom:14px; }
+      .kpi-group-title{ font-size:12.5px; font-weight:700; color:var(--ink-soft); margin:0 2px 8px; }
+      .split-card small{ display:block; margin-top:4px; font-size:11.5px; color:var(--ink-soft); }
+      .check-inline{ display:inline-flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; }
+      .ticket-void{ opacity:.62; background:repeating-linear-gradient(135deg,#fff,#fff 10px,#faf3f0 10px,#faf3f0 20px); }
+      .badge.red{ background:#F6E1DB; color:var(--danger); }
+      .icon-btn.warn{ color:var(--copper); border-color:#E8CFA9; }
       .sidebar-foot{ margin-top:auto; display:flex; align-items:flex-start; gap:6px; font-size:10.5px; color:#7D8A80; line-height:1.5; padding-top:12px; border-top:1px dashed #2C3B36; }
       .sidebar-user{ margin-top:auto; display:flex; flex-direction:column; align-items:stretch; gap:6px; padding-top:12px; border-top:1px solid #2C3B36; }
       .sidebar-user .logout-btn{ margin:0 !important; padding:6px 9px; text-align:center; }
@@ -4844,7 +5396,12 @@ function Style() {
         .sidebar-user .logout-btn{ padding:5px 8px; font-size:11px; }
         .nav{ order:3; width:100%; flex-direction:row; overflow-x:auto; gap:4px; padding:4px 0 10px; scrollbar-width:none; }
         .nav::-webkit-scrollbar{ display:none; }
-        .nav-item{ padding:7px 12px; }
+        .nav-item{ padding:7px 12px !important; }
+        .sidebar{ gap:8px 10px !important; padding:10px 12px 0 !important; }
+        .nav-group{ flex-direction:row; padding:0; border:0 !important; gap:4px; }
+        .nav-group-title{ display:none; }
+        .profit-value{ font-size:26px; }
+        .period-label{ width:100%; margin:0; }
         .sidebar-foot{ display:none; }
         .content{ padding:16px 14px 40px; }
         .page-head h2{ font-size:19px; }
