@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getFirestore, doc, getDoc, setDoc, collection, getDocs } from "firebase/firestore";
+import { getFirestore, doc, getDoc, setDoc, collection, getDocs, runTransaction } from "firebase/firestore";
 import {
   getAuth,
   signInWithEmailAndPassword,
@@ -52,6 +52,7 @@ const LIST_KEYS = [
   "equipment",
   "bankTxns",
   "expenses",
+  "auditLog",
 ];
 
 export function defaultAppData() {
@@ -67,6 +68,7 @@ export function defaultAppData() {
     equipment: [],
     bankTxns: [],
     expenses: [],
+    auditLog: [],
     settings: {
       paymentMethods: [
         "نقدًا (كاش)",
@@ -108,20 +110,83 @@ export async function loadAppData() {
   return result;
 }
 
-export async function saveAppData(prev, next) {
-  const writes = [];
+// دمج آمن: نطبّق فقط "تغييراتي أنا" (إضافة / تعديل / حذف حسب رقم السجل) فوق أحدث نسخة موجودة في السيرفر،
+// بدل ما نكتب القائمة كاملة ونمسح تعديلات الشريك الثاني. يتم داخل Transaction عشان ما يضيع شي لو حفظ الاثنين بنفس اللحظة.
+function hasIds(l) { return Array.isArray(l) && l.every((x) => x && typeof x === "object" && x.id != null); }
+
+export function mergeList(remote, prev, next) {
+  const pm = new Map((prev || []).map((x) => [x.id, JSON.stringify(x)]));
+  const nm = new Map(next.map((x) => [x.id, x]));
+  const removed = new Set();
+  (prev || []).forEach((x) => { if (!nm.has(x.id)) removed.add(x.id); });
+  const changed = new Map();
+  next.forEach((x) => { if (pm.get(x.id) !== JSON.stringify(x)) changed.set(x.id, x); });
+  const out = [];
+  const seen = new Set();
+  (remote || []).forEach((x) => {
+    if (removed.has(x.id)) return;
+    out.push(changed.has(x.id) ? changed.get(x.id) : x);
+    seen.add(x.id);
+  });
+  changed.forEach((x, id) => { if (!seen.has(id)) out.push(x); });
+  return out;
+}
+
+export function mergeSettings(remote, prev, next) {
+  const out = { ...(remote || {}) };
+  const keys = new Set([...Object.keys(next || {}), ...Object.keys(prev || {})]);
+  keys.forEach((k) => {
+    if (JSON.stringify((prev || {})[k]) !== JSON.stringify((next || {})[k])) {
+      if ((next || {})[k] === undefined) delete out[k]; else out[k] = next[k];
+    }
+  });
+  return out;
+}
+
+// replace=true: استبدال كامل (للاستعادة من نسخة احتياطية فقط)
+export async function saveAppData(prev, next, opts = {}) {
+  const merged = { ...next };
+  const replace = !!opts.replace;
   for (const key of LIST_KEYS) {
     const prevVal = prev ? prev[key] : undefined;
-    if (JSON.stringify(prevVal) !== JSON.stringify(next[key])) {
-      writes.push(setDoc(doc(db, "app", key), { list: next[key] }));
+    if (JSON.stringify(prevVal) === JSON.stringify(next[key])) continue;
+    const ref = doc(db, "app", key);
+    if (replace || !hasIds(next[key]) || (prev && !hasIds(prev[key] || []))) {
+      await setDoc(ref, { list: next[key] });
+      continue;
     }
+    merged[key] = await runTransaction(db, async (tx) => {
+      const snap = await tx.get(ref);
+      const remote = snap.exists() && Array.isArray(snap.data().list) ? snap.data().list : [];
+      const list = hasIds(remote) ? mergeList(remote, prevVal || [], next[key]) : next[key];
+      tx.set(ref, { list });
+      return list;
+    });
   }
   const prevMeta = prev ? { settings: prev.settings, nextInvoiceNo: prev.nextInvoiceNo, nextPurchaseNo: prev.nextPurchaseNo } : undefined;
   const nextMeta = { settings: next.settings, nextInvoiceNo: next.nextInvoiceNo, nextPurchaseNo: next.nextPurchaseNo };
   if (JSON.stringify(prevMeta) !== JSON.stringify(nextMeta)) {
-    writes.push(setDoc(doc(db, "app", "meta"), nextMeta));
+    const ref = doc(db, "app", "meta");
+    if (replace || !prevMeta) {
+      await setDoc(ref, nextMeta);
+    } else {
+      const m = await runTransaction(db, async (tx) => {
+        const snap = await tx.get(ref);
+        const r = snap.exists() ? snap.data() : {};
+        const out = {
+          settings: mergeSettings(r.settings, prevMeta.settings, nextMeta.settings),
+          nextInvoiceNo: Math.max(Number(r.nextInvoiceNo) || 0, Number(nextMeta.nextInvoiceNo) || 0),
+          nextPurchaseNo: Math.max(Number(r.nextPurchaseNo) || 0, Number(nextMeta.nextPurchaseNo) || 0),
+        };
+        tx.set(ref, out);
+        return out;
+      });
+      merged.settings = m.settings;
+      merged.nextInvoiceNo = m.nextInvoiceNo;
+      merged.nextPurchaseNo = m.nextPurchaseNo;
+    }
   }
-  await Promise.all(writes);
+  return merged;
 }
 
 /* ---- automatic daily backups: stored in their own "backups" collection,
