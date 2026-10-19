@@ -3318,6 +3318,7 @@ function OffersTab() {
   const blankCode = { code: "", kind: "percent", value: "", usage: "unlimited", maxUses: "", validity: "none", startDate: "", expires: "", marketer: "", commissionType: "percent", commission: "" };
   const [codeForm, setCodeForm] = useState(blankCode);
   const [codeError, setCodeError] = useState("");
+  const [editingCode, setEditingCode] = useState(null);
   const [confirmState, setConfirmState] = useState(null);
 
   async function reload() {
@@ -3399,6 +3400,9 @@ function OffersTab() {
     if (commission != null && !(commission >= 0)) return setCodeError("العمولة لازم تكون رقم موجب.");
     if (commission != null && !isFixed && commission > 100) return setCodeError("نسبة العمولة لازم تكون بين 0 و100.");
     if (commission != null && !codeForm.marketer.trim()) return setCodeError("اكتب اسم المسوّق عشان تنحسب له العمولة.");
+    const codeKey = String(codeForm.code || "").trim().toUpperCase();
+    const existing = state.codes.find((x) => x.code === codeKey);
+    if (existing && editingCode !== codeKey) return setCodeError("هذا الكود موجود. اضغط «تعديل» بجانبه إذا تبي تغيّر قيمته أو عمولته.");
     setBusy(true);
     try {
       await saveCode({
@@ -3412,15 +3416,37 @@ function OffersTab() {
         max_uses: maxUses,
         starts_at: codeForm.validity === "range" && codeForm.startDate ? `${codeForm.startDate}T00:00:00+04:00` : null,
         expires_at: codeForm.validity === "range" && codeForm.expires ? `${codeForm.expires}T23:59:59+04:00` : null,
-        active: true,
+        active: existing ? !!existing.active : true,
       });
       setCodeForm(blankCode);
+      setEditingCode(null);
       await reload();
     } catch (err) {
       setCodeError(err.message === "invalid_code" ? "الكود لازم يكون حروف إنجليزية أو أرقام (3 إلى 30)." : "ما انحفظ الكود: " + (err.message || err));
     }
     setBusy(false);
   }
+
+  function startEditCode(c) {
+    const isFixedC = c.commission_type === "fixed";
+    setCodeForm({
+      code: c.code,
+      kind: c.percent_off != null ? "percent" : "amount",
+      value: String(c.percent_off != null ? Number(c.percent_off) : Number(c.amount_off ?? "")),
+      usage: c.max_uses == null ? "unlimited" : c.max_uses === 1 ? "once" : c.max_uses === 2 ? "twice" : "custom",
+      maxUses: c.max_uses == null ? "" : String(c.max_uses),
+      validity: c.starts_at || c.expires_at ? "range" : "none",
+      startDate: c.starts_at ? muscatDate(c.starts_at) : "",
+      expires: c.expires_at ? muscatDate(c.expires_at) : "",
+      marketer: c.marketer_name || "",
+      commissionType: isFixedC ? "fixed" : "percent",
+      commission: (isFixedC ? c.commission_fixed : c.commission_percent) == null ? "" : String(isFixedC ? c.commission_fixed : c.commission_percent),
+    });
+    setEditingCode(c.code);
+    setCodeError("");
+    setTimeout(() => { const el = document.getElementById("code-form"); if (el && el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "center" }); }, 50);
+  }
+  function cancelEditCode() { setCodeForm(blankCode); setEditingCode(null); setCodeError(""); }
 
   async function toggleCode(c) {
     setBusy(true);
@@ -3566,9 +3592,14 @@ function OffersTab() {
       <div className="panel">
         <div className="panel-head"><h3>أكواد الخصم (يكتبها العميل بصفحة الدفع)</h3></div>
         <p style={{ margin: "0 0 10px", fontSize: 12, color: "var(--ink-soft)" }}>لما العميل يكتب كود صحيح، يلغي عرض الموقع على طلبه ويتطبّق الكود فقط على السعر الأصلي (ما يجتمع خصمان). الكود يكتبه العميل بحروف إنجليزية.</p>
-        <form onSubmit={createCode}>
+        <form id="code-form" onSubmit={createCode}>
+          {editingCode && (
+            <div className="alert-banner" style={{ marginBottom: 12, background: "var(--gold-soft, #f6efd9)", color: "var(--ink)" }}>
+              <AlertCircle size={15} /> تعدّل الكود <strong dir="ltr">{editingCode}</strong>. التغيير يسري على الطلبات الجديدة فقط. الطلبات اللي تمت قبل التعديل تبقى بقيمة الخصم والعمولة اللي انحسبت فيها، فتقارير الشهور السابقة ما تتغير.
+            </div>
+          )}
           <div className="grid-2">
-            <Field label="الكود"><input value={codeForm.code} onChange={(e) => setCodeForm({ ...codeForm, code: e.target.value.toUpperCase() })} placeholder="WELCOME10" dir="ltr" /></Field>
+            <Field label="الكود"><input value={codeForm.code} readOnly={!!editingCode} onChange={(e) => setCodeForm({ ...codeForm, code: e.target.value.toUpperCase() })} placeholder="WELCOME10" dir="ltr" /></Field>
             <Field label="نوع الخصم">
               <select value={codeForm.kind} onChange={(e) => setCodeForm({ ...codeForm, kind: e.target.value })}>
                 <option value="percent">نسبة مئوية %</option>
@@ -3616,7 +3647,8 @@ function OffersTab() {
             <Field label={codeForm.commissionType === "fixed" ? "مبلغ العمولة لكل منتج (ر.ع) — اختياري" : "نسبة العمولة % — اختياري"}><input type="number" step="any" min="0" max={codeForm.commissionType === "fixed" ? undefined : 100} value={codeForm.commission} onChange={(e) => setCodeForm({ ...codeForm, commission: e.target.value })} placeholder={codeForm.commissionType === "fixed" ? "1.000" : "10"} dir="ltr" /></Field>
           </div>
           {codeError && <div className="alert-banner" style={{ marginBottom: 10 }}><AlertCircle size={15} /> {codeError}</div>}
-          <button className="btn-primary" type="submit" disabled={busy}><Plus size={15} /> إضافة الكود</button>
+          <button className="btn-primary" type="submit" disabled={busy}>{editingCode ? <>حفظ التعديل</> : <><Plus size={15} /> إضافة الكود</>}</button>
+          {editingCode && <button className="btn-ghost" type="button" style={{ marginInlineStart: 8 }} onClick={cancelEditCode}>إلغاء التعديل</button>}
         </form>
         {state.codes.length > 0 && (
           <div className="mini-list" style={{ marginTop: 14 }}>
@@ -3630,6 +3662,7 @@ function OffersTab() {
                   </div>
                 </span>
                 {(() => { const st = codeStatus(c, state.now); return <span className={`badge ${st.cls}`}>{st.label}</span>; })()}
+                <button className="btn-ghost" disabled={busy} onClick={() => startEditCode(c)}>تعديل</button>
                 <button className="btn-ghost" disabled={busy} onClick={() => toggleCode(c)}>{c.active ? "إيقاف" : "تشغيل"}</button>
                 <button className="btn-ghost" disabled={busy} onClick={() => removeCode(c)}><Trash2 size={14} /></button>
               </div>
@@ -3667,8 +3700,9 @@ function MarketersTab() {
   const grouped = useMemo(() => {
     const map = new Map();
     for (const r of state.rows) {
-      const g = map.get(r.marketer) || { marketer: r.marketer, codes: [], orders: 0, units: 0, customers: 0, sales: 0, commission: 0, hasCommission: false };
+      const g = map.get(r.marketer) || { marketer: r.marketer, codes: [], orders: 0, units: 0, customers: 0, sales: 0, commission: 0, hasCommission: false, mixed: false };
       g.codes.push(r.code);
+      if (r.mixed) g.mixed = true;
       g.orders += r.orders; g.units += r.units || 0; g.customers += r.customers; g.sales += r.sales;
       if (r.commission != null) { g.commission += r.commission; g.hasCommission = true; }
       map.set(r.marketer, g);
@@ -3718,7 +3752,7 @@ function MarketersTab() {
                 {grouped.map((g) => (
                   <tr key={g.marketer}>
                     <td><strong>{g.marketer}</strong></td>
-                    <td dir="ltr" style={{ textAlign: "right" }}>{g.codes.join(" + ")}</td>
+                    <td dir="ltr" style={{ textAlign: "right" }}>{g.codes.join(" + ")}{g.mixed && <div style={{ fontSize: 11, color: "var(--ink-soft)", direction: "rtl" }}>العمولة تغيّرت خلال الشهر (كل طلب بشرطه وقت الشراء)</div>}</td>
                     <td>{g.orders}</td>
                     <td>{g.units}</td>
                     <td>{g.customers}</td>
