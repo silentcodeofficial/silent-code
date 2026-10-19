@@ -3422,7 +3422,7 @@ function OffersTab() {
       setEditingCode(null);
       await reload();
     } catch (err) {
-      setCodeError(err.message === "invalid_code" ? "الكود لازم يكون حروف إنجليزية أو أرقام (3 إلى 30)." : "ما انحفظ الكود: " + (err.message || err));
+      setCodeError(err.message === "invalid_code" ? "الكود لازم يكون حروف إنجليزية أو أرقام (من حرف واحد إلى 30)." : "ما انحفظ الكود: " + (err.message || err));
     }
     setBusy(false);
   }
