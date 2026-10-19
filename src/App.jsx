@@ -537,7 +537,7 @@ function printPeriodNow(period, data, lang = "ar") {
       <td><bdi>${fmt(invoiceComputed(inv).totalPaid)}</bdi></td>
     </tr>`)
     .join("");
-  const methodRows = Object.entries(byMethod).map(([method, amt]) => `<div class="totals-row"><span>${method}</span><span><bdi>${fmt(amt)} ${L.currency}</bdi></span></div>`).join("");
+  const methodRows = Object.entries(byMethod).map(([method, amt]) => `<div class="totals-row"><span>${escHtml(method)}</span><span><bdi>${fmt(amt)} ${L.currency}</bdi></span></div>`).join("");
   const html = `
     <div class="accent-bar"></div>
     <div class="sheet">
