@@ -247,27 +247,30 @@ function availableToSell(data, productId, excludeInvoiceId) {
   return producedQty(data, productId) + adjustedQty(data, productId) - soldQtyExcludingInvoice(data, productId, excludeInvoiceId) - sampledQty(data, productId) - lostQty(data, productId);
 }
 
+// تقريب لأقرب بيسة (0.001 ر.ع) — يمنع تراكم الكسور في الأرصدة
+const r3 = (n) => Math.round((Number(n) || 0) * 1000 + (Number(n) >= 0 ? 1e-7 : -1e-7)) / 1000;
+
 function invoiceComputed(inv) {
   const items = (inv.items || []).map((it) => {
     const qty = Number(it.qty) || 0;
     const price = Number(it.unitPrice) || 0;
-    const gross = qty * price;
-    const lineDiscount = Math.min(Number(it.discount) || 0, gross);
-    const afterLineDiscount = gross - lineDiscount;
+    const gross = r3(qty * price);
+    const lineDiscount = r3(Math.min(Number(it.discount) || 0, gross));
+    const afterLineDiscount = r3(gross - lineDiscount);
     return { ...it, qty, price, gross, lineDiscount, afterLineDiscount };
   });
-  const subtotal = items.reduce((s, it) => s + it.afterLineDiscount, 0);
+  const subtotal = r3(items.reduce((s, it) => s + it.afterLineDiscount, 0));
   let invoiceDiscountAmount = 0;
-  if (inv.discountType === "percent") invoiceDiscountAmount = subtotal * ((Number(inv.discountValue) || 0) / 100);
-  else invoiceDiscountAmount = Math.min(Number(inv.discountValue) || 0, subtotal);
-  const grandTotal = subtotal - invoiceDiscountAmount;
+  if (inv.discountType === "percent") invoiceDiscountAmount = r3(subtotal * ((Number(inv.discountValue) || 0) / 100));
+  else invoiceDiscountAmount = r3(Math.min(Number(inv.discountValue) || 0, subtotal));
+  const grandTotal = r3(subtotal - invoiceDiscountAmount);
   const itemsWithNet = items.map((it) => {
     const share = subtotal > 0 ? it.afterLineDiscount / subtotal : 0;
     return { ...it, netRevenue: it.afterLineDiscount - invoiceDiscountAmount * share };
   });
   // الشحن: مبلغ يدفعه العميل لشركة الشحن (تمرير) — ما يدخل الإيراد ولا الضريبة ولا الربح، لكنه يدخل المبلغ المدفوع والحسابات
   const shipping = Math.max(0, Number(inv.shippingFee) || 0);
-  return { items: itemsWithNet, subtotal, invoiceDiscountAmount, grandTotal, shipping, totalPaid: grandTotal + shipping };
+  return { items: itemsWithNet, subtotal, invoiceDiscountAmount, grandTotal, shipping, totalPaid: r3(grandTotal + shipping) };
 }
 
 /* ---- printing: fully isolated popup window, independent of the app's own CSS/layout ---- */
@@ -275,6 +278,7 @@ function invoiceComputed(inv) {
 const PRINT_LABELS = {
   ar: {
     dir: "rtl", htmlLang: "ar", fontFamily: "'Cairo','Segoe UI',Tahoma,Arial,sans-serif",
+    unpaidStamp: "على الحساب", amountDue: "المبلغ المستحق", dueDate: "تاريخ الاستحقاق", paidOn: "تاريخ الدفع",
     docTitle: "فاتورة بيع", tagline: "صناعة وتغليف العطور",
     customerInfo: "معلومات العميل", delivery: "التسليم", pickup: "استلام من المصنع", deliveryType: "توصيل",
     item: "الصنف", qty: "الكمية", unitPrice: "سعر الوحدة", discount: "خصم", total: "الإجمالي",
@@ -289,6 +293,7 @@ const PRINT_LABELS = {
   },
   en: {
     dir: "ltr", htmlLang: "en", fontFamily: "'Segoe UI',Tahoma,Arial,sans-serif",
+    unpaidStamp: "UNPAID", amountDue: "Amount due", dueDate: "Due date", paidOn: "Paid on",
     docTitle: "Sales Invoice", tagline: "Perfume Manufacturing & Packaging",
     customerInfo: "Customer Info", delivery: "Delivery", pickup: "Factory Pickup", deliveryType: "Delivery",
     item: "Item", qty: "Qty", unitPrice: "Unit Price", discount: "Discount", total: "Total",
@@ -382,6 +387,7 @@ function invoiceStyles(lang) {
   .eyebrow { font-size: 12px; letter-spacing: .14em; color: #C79B58; text-transform: uppercase; }
   .eyebrow.small { font-size: 12px; margin-bottom: 4px; }
   .inv-no { font-size: 26px; font-weight: 700; color: #34090e; margin-top: 4px; direction: ltr; text-align: ${start}; }
+  .unpaid-stamp { display: inline-block; border: 2px solid #b4541a; color: #b4541a; padding: 4px 14px; font-weight: 700; letter-spacing: .1em; font-size: 13px; }
   .paid-stamp { display: inline-block; border: 2px solid #34090e; color: #34090e; padding: 4px 14px; font-weight: 700; letter-spacing: .1em; font-size: 13px; }
   .meta { margin-bottom: 22px; font-size: 14px; color: #5b4f45; }
   .meta span { color: #1b1412; }
@@ -412,7 +418,7 @@ function invoiceStyles(lang) {
 `;
 }
 
-function openPrintWindow(lang, bodyHTML, styles) {
+function openPrintWindow(lang, bodyHTML, styles, docTitle) {
   const win = window.open("", "_blank", "width=850,height=1000");
   if (!win) {
     alert("المتصفح منع فتح نافذة الطباعة. فعّل النوافذ المنبثقة (Popups) لهذا الموقع وحاول مرة ثانية. / Popup blocked — please allow popups for this site.");
@@ -420,7 +426,7 @@ function openPrintWindow(lang, bodyHTML, styles) {
   }
   const L = PRINT_LABELS[lang];
   win.document.open();
-  win.document.write(`<!doctype html><html dir="${L.dir}" lang="${L.htmlLang}"><head><meta charset="utf-8" /><title>${L.docTitle}</title><style>${styles || printStyles(lang)}</style></head><body>${bodyHTML}</body></html>`);
+  win.document.write(`<!doctype html><html dir="${L.dir}" lang="${L.htmlLang}"><head><meta charset="utf-8" /><title>${String(docTitle || L.docTitle).replace(/[<>&"]/g, "").replace(/[\\/:*?|]/g, "-")}</title><style>${styles || printStyles(lang)}</style></head><body>${bodyHTML}</body></html>`);
   win.document.close();
   win.onload = () => { win.focus(); win.print(); };
   setTimeout(() => { try { win.focus(); win.print(); } catch (e) {} }, 400);
@@ -485,11 +491,11 @@ function printInvoiceNow(invoice, data, lang = "ar") {
           <div class="eyebrow">${L.invoiceWord}</div>
           <div class="inv-no"><bdi>${escHtml(invoice.webInvoiceNumber || "#" + invoice.number)}</bdi></div>
         </td>
-        <td class="top-end">${isWeb ? `<span class="paid-stamp">${L.paid}</span>` : ""}</td>
+        <td class="top-end">${isWeb ? `<span class="paid-stamp">${L.paid}</span>` : invoice.unpaid ? `<span class="unpaid-stamp">${L.unpaidStamp}</span>` : ""}</td>
       </tr></table>
       <table class="meta"><tr>
         <td class="top-start">${L.dateLabel}: <span><bdi>${escHtml(invoice.date)}</bdi></span></td>
-        <td class="top-end">${invoice.webOrderRef ? `${L.orderRef}: <span><bdi>${escHtml(invoice.webOrderRef)}</bdi></span>` : ""}</td>
+        <td class="top-end">${invoice.webOrderRef ? `${L.orderRef}: <span><bdi>${escHtml(invoice.webOrderRef)}</bdi></span>` : invoice.unpaid && invoice.dueDate ? `${L.dueDate}: <span><bdi>${escHtml(invoice.dueDate)}</bdi></span>` : invoice.wasOnAccount && invoice.paidDate ? `${L.paidOn}: <span><bdi>${escHtml(invoice.paidDate)}</bdi></span>` : ""}</td>
       </tr></table>
       <div class="billed">
         <div class="eyebrow small">${L.billedTo}</div>
@@ -508,10 +514,10 @@ function printInvoiceNow(invoice, data, lang = "ar") {
           ${computed.invoiceDiscountAmount > 0 ? sumRow(L.invoiceDiscount, `− ${fmt(computed.invoiceDiscountAmount)} ${L.currency}`) : ""}
           ${computed.shipping > 0 ? sumRow(L.shipping, `${fmt(computed.shipping)} ${L.currency}`) : ""}
           <tr><td colspan="2" class="sum-rule"></td></tr>
-          ${sumRow(isWeb ? L.grandTotalPaid : L.grandTotal, `${fmt(computed.totalPaid)} ${L.currency}`, true)}
+          ${sumRow(isWeb ? L.grandTotalPaid : invoice.unpaid ? L.amountDue : L.grandTotal, `${fmt(computed.totalPaid)} ${L.currency}`, true)}
         </table>
       </td></tr></table>
-      ${pay ? `<div class="pay">${pay}</div>` : ""}
+      ${pay && !invoice.unpaid ? `<div class="pay">${pay}</div>` : ""}
       ${invoice.note ? `<div class="note">${L.notes}: ${escHtml(invoice.note)}</div>` : ""}
       <div class="foot">
         <div class="foot-thanks">${L.thanksBrand}</div>
@@ -521,7 +527,7 @@ function printInvoiceNow(invoice, data, lang = "ar") {
       </div>
     </div>
   `;
-  openPrintWindow(lang, html, invoiceStyles(lang));
+  openPrintWindow(lang, html, invoiceStyles(lang), String(invoice.webInvoiceNumber || invoice.number || "").trim() || undefined);
 }
 
 function printPeriodNow(period, data, lang = "ar") {
@@ -657,7 +663,11 @@ function customerStats(invoices) {
 // وإذا انرد مبلغ للعميل (refundAmount) يبقى دخول المبلغ وخروج المرتجع ظاهرين بالحسابات.
 const isVoid = (inv) => !!(inv && inv.void);
 const voidRefund = (inv) => (isVoid(inv) ? Math.max(0, Number(inv.void.refundAmount) || 0) : 0);
-const countsInAccounts = (inv) => !isVoid(inv) || voidRefund(inv) > 0;
+const isUnpaid = (inv) => !!inv.unpaid && !isVoid(inv);
+// فاتورة على الحساب لم تُدفع: ما تدخل أي حساب (بنك/كاش) إلى أن يُسجَّل دفعها
+const countsInAccounts = (inv) => !inv.unpaid && (!isVoid(inv) || voidRefund(inv) > 0);
+// تاريخ دخول المبلغ للحساب: تاريخ الدفع لو كانت على الحساب ثم دُفعت
+const cashDate = (inv) => inv.paidDate || inv.date;
 function activeData(d) { return d && d.invoices.some(isVoid) ? { ...d, invoices: d.invoices.filter((i) => !isVoid(i)) } : d; }
 const lockDate = (d) => (d && d.settings && d.settings.lockedUntil) || "";
 const isLocked = (d, date) => { const l = lockDate(d); return !!l && !!date && String(date) <= l; };
@@ -1353,7 +1363,7 @@ export default function CostingApp() {
         {tab === "invoices" && <InvoicesTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "webOrders" && <WebOrdersTab data={data} webState={webState} onSync={syncWebOrders} onImport={importManualWebOrder} fulfil={fulfil} onReloadFulfil={loadFulfillment} onChangeStatus={changeFulfillment} transfers={transfers} onTransfer={transferAction} />}
         {tab === "offers" && <OffersTab />}
-        {tab === "marketers" && <MarketersTab />}
+        {tab === "marketers" && <MarketersTab data={data} />}
         {tab === "accounts" && <AccountsTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "expenses" && <ExpensesTab data={data} persist={persist} currentUser={currentUser} />}
         {tab === "vat" && <VatTab data={vd} />}
@@ -1461,6 +1471,8 @@ function Dashboard({ data: full }) {
     };
   });
 
+  const receivablesList = (full.invoices || []).filter(isUnpaid);
+  const receivablesTotal = r3(receivablesList.reduce((x, i) => x + invoiceComputed(i).totalPaid, 0));
   const profitColor = totals.operatingNetProfit >= 0 ? "var(--success)" : "var(--danger)";
   const groups = [
     { title: "الأداء", items: [
@@ -1476,6 +1488,9 @@ function Dashboard({ data: full }) {
       { label: "مصروفات أخرى", value: totals.totalExpenses, color: "#8C4B3D", Icon: Receipt },
       ...(totals.depInProfit ? [{ label: "إهلاك الأصول", value: totals.depreciation, color: "#5C6A63", Icon: Wrench }] : []),
     ] },
+    ...(receivablesList.length ? [{ title: "فواتير على الحساب (لم تُدفع)", items: [
+      { label: `مستحقات على العملاء (${receivablesList.length} فاتورة)`, value: receivablesTotal, color: "#b4541a", Icon: Wallet },
+    ] }] : []),
     { title: "ضريبة القيمة المضافة 5%", items: [
       { label: "ضريبة المبيعات", value: totals.outputVat, color: "#6B4C8C", Icon: Receipt },
       { label: "ضريبة المشتريات (تُخصم)", value: totals.inputVat, color: "#6B4C8C", Icon: Receipt },
@@ -2604,7 +2619,7 @@ function emptyInvoice(nextNo, defaultMethod) {
   return {
     id: uid("inv"), number: nextNo, date: todayStr(), customerName: "", customerPhone: "",
     paymentMethod: defaultMethod || "", note: "",
-    discountType: "fixed", discountValue: "",
+    discountType: "fixed", discountValue: "", unpaid: false, dueDate: "",
     deliveryType: "pickup", deliveryAddress: "",
     overheadUsage: [],
     items: [{ id: uid("it"), productId: "", qty: 1, unitPrice: "", discount: "", free: false }],
@@ -2619,6 +2634,8 @@ function InvoicesTab({ data, persist, currentUser }) {
   const [q, setQ] = useState("");
   const [voiding, setVoiding] = useState(null);
   const [showVoided, setShowVoided] = useState(true);
+  const [payFilter, setPayFilter] = useState("all");
+  const [paying, setPaying] = useState(null);
   const methods = data.settings.paymentMethods || [];
   const guard = (date) => { if (isLocked(data, date)) { alert(lockMsg(data)); return true; } return false; };
 
@@ -2657,6 +2674,11 @@ function InvoicesTab({ data, persist, currentUser }) {
       },
     });
   }
+  function startPay(inv) { if (guard(todayStr())) return; setPaying(inv); }
+  function confirmPay(inv, p) {
+    persist({ ...data, invoices: data.invoices.map((i) => (i.id === inv.id ? { ...i, unpaid: false, wasOnAccount: true, paidDate: p.date, paymentMethod: p.method, paidBy: currentUser?.name } : i)) });
+    setPaying(null);
+  }
   function startVoid(inv) { if (guard(inv.date)) return; setVoiding(inv); }
   function confirmVoid(inv, v) {
     const materials = applyOverheadStockDelta(data.materials, inv.overheadUsage, []);
@@ -2676,15 +2698,17 @@ function InvoicesTab({ data, persist, currentUser }) {
   function invoiceTotal(inv) { return invoiceComputed(inv).totalPaid; }
 
   const qn = q.trim().toLowerCase();
-  const filtered = data.invoices.filter((inv) => (showVoided || !isVoid(inv)) && (!dateFrom || inv.date >= dateFrom) && (!dateTo || inv.date <= dateTo)
+  const filtered = data.invoices.filter((inv) => (showVoided || !isVoid(inv)) && (payFilter === "all" || (payFilter === "unpaid" ? isUnpaid(inv) : !isUnpaid(inv))) && (!dateFrom || inv.date >= dateFrom) && (!dateTo || inv.date <= dateTo)
     && (!qn || String(inv.number).includes(qn) || (inv.customerName || "").toLowerCase().includes(qn) || (inv.customerPhone || "").includes(qn)));
   const isFiltering = dateFrom || dateTo;
   const liveFiltered = filtered.filter((inv) => !isVoid(inv));
   const voidedCount = data.invoices.filter(isVoid).length;
+  const unpaidList = data.invoices.filter(isUnpaid);
+  const unpaidTotal = r3(unpaidList.reduce((s, inv) => s + invoiceTotal(inv), 0));
   const periodTotal = liveFiltered.reduce((s, inv) => s + invoiceTotal(inv), 0);
   const byMethod = {};
   liveFiltered.forEach((inv) => {
-    const m = inv.paymentMethod || "بدون طريقة دفع";
+    const m = inv.unpaid ? "على الحساب (غير مدفوعة)" : (inv.paymentMethod || "بدون طريقة دفع");
     byMethod[m] = (byMethod[m] || 0) + invoiceTotal(inv);
   });
 
@@ -2696,6 +2720,13 @@ function InvoicesTab({ data, persist, currentUser }) {
         desc="سجل فواتير البيع بطريقة الدفع، واطبعها، وتنعكس تلقائيًا على تقارير المنتجات"
         action={data.products.length > 0 && <button className="btn-primary" onClick={startNew}><Plus size={16} /> فاتورة جديدة</button>}
       />
+
+      {unpaidList.length > 0 && (
+        <div className="alert-banner" style={{ background: "#FBEFD9", color: "#8a5a12", borderColor: "#F0DBB0", justifyContent: "space-between", flexWrap: "wrap" }}>
+          <span><b>فواتير على الحساب لم تُدفع:</b> {unpaidList.length} فاتورة — المستحق {fmt(unpaidTotal)} ر.ع (لم تدخل أرصدة البنك/الكاش بعد)</span>
+          <button className="btn-ghost" onClick={() => setPayFilter(payFilter === "unpaid" ? "all" : "unpaid")}>{payFilter === "unpaid" ? "عرض الكل" : "عرض غير المدفوعة"}</button>
+        </div>
+      )}
 
       {data.invoices.length > 0 && (
         <div className="panel">
@@ -2709,6 +2740,13 @@ function InvoicesTab({ data, persist, currentUser }) {
                 <button className="btn-ghost" onClick={() => { setDateFrom(""); setDateTo(""); setQ(""); }}>مسح الفلتر</button>
               </div>
             )}
+            <Field label="حالة الدفع">
+              <select value={payFilter} onChange={(e) => setPayFilter(e.target.value)}>
+                <option value="all">الكل</option>
+                <option value="unpaid">على الحساب (غير مدفوعة)</option>
+                <option value="paid">المدفوعة فقط</option>
+              </select>
+            </Field>
             {voidedCount > 0 && (
               <div style={{ display: "flex", alignItems: "flex-end" }}>
                 <label className="check-inline"><input type="checkbox" checked={showVoided} onChange={(e) => setShowVoided(e.target.checked)} /> إظهار الملغاة ({voidedCount})</label>
@@ -2753,8 +2791,11 @@ function InvoicesTab({ data, persist, currentUser }) {
                 <div className="ticket-top">
                   <span className="ticket-no">فاتورة #{inv.number}</span>
                   {isVoid(inv) && <span className="badge red">ملغاة / مرتجع</span>}
+                  {isUnpaid(inv) && <span className="badge amber">على الحساب — غير مدفوعة{inv.dueDate ? ` · استحقاق ${inv.dueDate}` : ""}</span>}
+                  {inv.wasOnAccount && !inv.unpaid && inv.paidDate && <span className="badge green">دُفعت {inv.paidDate}</span>}
                   <span className="ticket-date">{inv.date}</span>
-                  {inv.paymentMethod && <span className="badge blue">{inv.paymentMethod}</span>}
+                  {inv.paymentMethod && !inv.unpaid && <span className="badge blue">{inv.paymentMethod}</span>}
+                  {inv.marketer && inv.marketer.name && <span className="badge green">مسوّق: {inv.marketer.name}{inv.discountCode ? ` (${inv.discountCode})` : ""}</span>}
                   {inv.deliveryType === "delivery" && <span className="badge amber">توصيل</span>}
                   {inv.createdBy && <span className="badge green">{inv.createdBy}</span>}
                 </div>
@@ -2776,6 +2817,7 @@ function InvoicesTab({ data, persist, currentUser }) {
                     <button className="icon-btn" onClick={() => unvoid(inv)}>إعادة تفعيل</button>
                   ) : (
                     <>
+                      {isUnpaid(inv) && <button className="icon-btn" style={{ background: "var(--success)", color: "#fff" }} onClick={() => startPay(inv)}>تسجيل الدفع</button>}
                       <button className="icon-btn" onClick={() => { if (!guard(inv.date)) setEditing(inv); }}>تعديل</button>
                       <button className="icon-btn warn" onClick={() => startVoid(inv)}>إلغاء / مرتجع</button>
                     </>
@@ -2789,8 +2831,39 @@ function InvoicesTab({ data, persist, currentUser }) {
       )}
 
       {editing && <InvoiceEditor invoice={editing} data={activeData(data)} products={data.products} methods={methods} allInvoices={data.invoices} onSave={save} onClose={() => setEditing(null)} />}
+      {paying && <PayInvoiceModal invoice={paying} methods={methods} onCancel={() => setPaying(null)} onConfirm={(p) => confirmPay(paying, p)} />}
       {voiding && <VoidModal invoice={voiding} data={data} onCancel={() => setVoiding(null)} onConfirm={(v) => confirmVoid(voiding, v)} />}
       <ConfirmModal state={confirmState} onCancel={() => setConfirmState(null)} />
+    </div>
+  );
+}
+
+function PayInvoiceModal({ invoice, methods, onCancel, onConfirm }) {
+  const total = invoiceComputed(invoice).totalPaid;
+  const [date, setDate] = useState(muscatDate(new Date().toISOString()));
+  const [method, setMethod] = useState(invoice.paymentMethod || methods[0] || "");
+  const bad = !date || !method;
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div className="modal" style={{ maxWidth: 480 }} onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head"><h3>تسجيل دفع — فاتورة #{invoice.number}</h3><button className="icon-btn" onClick={onCancel}><X size={18} /></button></div>
+        <div className="modal-body">
+          <p className="field-hint" style={{ marginBottom: 10 }}>{invoice.customerName || "عميل"} — المبلغ المستحق <b>{fmt(total)} ر.ع</b>. بعد التسجيل يدخل المبلغ حساب طريقة الدفع المختارة بتاريخ الدفع.</p>
+          <div className="form-row">
+            <Field label="تاريخ الدفع"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+            <Field label="طريقة الدفع">
+              <select value={method} onChange={(e) => setMethod(e.target.value)}>
+                <option value="">اختر</option>
+                {methods.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+            </Field>
+          </div>
+        </div>
+        <div className="modal-foot">
+          <button className="btn-ghost" onClick={onCancel}>رجوع</button>
+          <button className="btn-primary" disabled={bad} onClick={() => onConfirm({ date, method })}>تأكيد استلام {fmt(total)} ر.ع</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2799,7 +2872,7 @@ function VoidModal({ invoice, data, onCancel, onConfirm }) {
   const total = invoiceComputed(invoice).totalPaid;
   const defAcc = methodAccount(data.settings, invoice.paymentMethod);
   const [reason, setReason] = useState("");
-  const [refunded, setRefunded] = useState(!!defAcc);
+  const [refunded, setRefunded] = useState(!!defAcc && !invoice.unpaid);
   const [amount, setAmount] = useState(String(Number(total.toFixed(3))));
   const [account, setAccount] = useState(defAcc && defAcc !== "thawani" ? defAcc : (defAcc === "thawani" ? "thawani" : "sohar"));
   const [date, setDate] = useState(muscatDate(new Date().toISOString()));
@@ -2815,16 +2888,17 @@ function VoidModal({ invoice, data, onCancel, onConfirm }) {
             <Field label="تاريخ الإلغاء"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
             <Field label="السبب"><input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="مثال: العميل ألغى الطلب" /></Field>
           </div>
-          <label className="check-inline" style={{ margin: "6px 0 10px" }}>
+          {invoice.unpaid && <p className="field-hint">هذي فاتورة على الحساب لم تُدفع، فما فيه مبلغ يُرد — بتنلغى فقط.</p>}
+          {!invoice.unpaid && <label className="check-inline" style={{ margin: "6px 0 10px" }}>
             <input type="checkbox" checked={refunded} onChange={(e) => setRefunded(e.target.checked)} /> تم رد مبلغ للعميل (أو المبلغ كان مستلم وبينرد)
-          </label>
+          </label>}
           {refunded && (
             <div className="form-row">
               <Field label="المبلغ المردود (ر.ع)" hint={`الفاتورة ${fmt(total)} ر.ع شامل الشحن`}><input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
               <Field label="انرد من حساب"><select value={account} onChange={(e) => setAccount(e.target.value)}>{ACCOUNTS.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></Field>
             </div>
           )}
-          {!refunded && <p className="field-hint">بدون رد مبلغ: الفاتورة بتختفي من الحسابات كأنها ما دخلت (مناسب لطلب ما انستلم له مبلغ).</p>}
+          {!refunded && !invoice.unpaid && <p className="field-hint">بدون رد مبلغ: الفاتورة بتختفي من الحسابات كأنها ما دخلت (مناسب لطلب ما انستلم له مبلغ).</p>}
         </div>
         <div className="modal-foot">
           <button className="btn-ghost" onClick={onCancel}>رجوع</button>
@@ -2838,6 +2912,40 @@ function VoidModal({ invoice, data, onCancel, onConfirm }) {
 function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, onClose }) {
   const [inv, setInv] = useState(invoice);
   function set(f, v) { setInv({ ...inv, [f]: v }); }
+  const [codeInput, setCodeInput] = useState(invoice.discountCode || "");
+  const [codeBusy, setCodeBusy] = useState(false);
+  const [codeMsg, setCodeMsg] = useState({ ok: false, text: "" });
+  async function applyCode(noDiscount) {
+    const code = codeInput.trim().toUpperCase();
+    if (!code) { setCodeMsg({ ok: false, text: "اكتب الكود أولاً." }); return; }
+    setCodeBusy(true); setCodeMsg({ ok: false, text: "" });
+    try {
+      const r = await listOffers();
+      const c = (r.codes || []).find((x) => String(x.code).toUpperCase() === code);
+      const now = new Date();
+      if (!c) { setCodeMsg({ ok: false, text: "هذا الكود غير موجود في الموقع. تأكد من الكتابة." }); return; }
+      if (c.active === false) { setCodeMsg({ ok: false, text: "هذا الكود موقوف." }); return; }
+      if (c.starts_at && new Date(c.starts_at) > now) { setCodeMsg({ ok: false, text: "هذا الكود لم يبدأ بعد." }); return; }
+      if (c.expires_at && new Date(c.expires_at) < now) { setCodeMsg({ ok: false, text: "هذا الكود منتهي." }); return; }
+      if (c.max_uses != null && Number(c.used_count) >= Number(c.max_uses)) { setCodeMsg({ ok: false, text: "هذا الكود استُهلك (وصل الحد الأقصى للاستخدام)." }); return; }
+      const next = { ...inv, discountCode: String(c.code).toUpperCase(), codeNoDiscount: !!noDiscount };
+      if (!noDiscount) {
+        if (c.percent_off != null) { next.discountType = "percent"; next.discountValue = Number(c.percent_off); }
+        else { next.discountType = "fixed"; next.discountValue = Number(c.amount_off) || ""; }
+      } else { next.discountType = "fixed"; next.discountValue = ""; }
+      if (c.marketer_name) next.marketer = { code: String(c.code).toUpperCase(), name: c.marketer_name, type: c.commission_type === "fixed" ? "fixed" : "percent", percent: Number(c.commission_percent) || 0, fixed: Number(c.commission_fixed) || 0 };
+      else delete next.marketer;
+      setInv(next);
+      setCodeMsg({ ok: true, text: `تم تطبيق الكود ${next.discountCode}${noDiscount ? " (بدون خصم للعميل)" : c.percent_off != null ? ` — خصم ${Number(c.percent_off)}%` : ` — خصم ${Number(c.amount_off).toFixed(3)} ر.ع`}${c.marketer_name ? ` — يُحتسب للمسوّق: ${c.marketer_name}` : " — (الكود بدون مسوّق)"}` });
+    } catch (e) {
+      setCodeMsg({ ok: false, text: "تعذر الاتصال بالموقع للتحقق من الكود. تأكد من الإنترنت وحاول مرة ثانية. (" + (e.message || e) + ")" });
+    } finally { setCodeBusy(false); }
+  }
+  function removeCode() {
+    const { discountCode: _a, codeNoDiscount: _b, marketer: _c, ...rest } = inv;
+    setInv({ ...rest, discountType: "fixed", discountValue: "" });
+    setCodeInput(""); setCodeMsg({ ok: false, text: "" });
+  }
   function setItem(id, field, val) {
     setInv({
       ...inv,
@@ -3028,6 +3136,24 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
             </>
           )}
 
+          <div className="sub-head">كود خصم / كود مسوّق (اختياري)</div>
+          <p className="field-hint" style={{ marginBottom: 8 }}>لو العميل (مثلاً من الواتساب) أعطاك كود مسوّق: اكتبه واضغط «تطبيق». ينتحقق منه مع الموقع، ويطبّق الخصم، وتنحسب عمولة المسوّق من هالفاتورة بتقرير المسوّقين.</p>
+          {inv.discountCode ? (
+            <div className="alert-banner" style={{ background: "#E1F0E7", color: "var(--success)", borderColor: "#BEE0CB", justifyContent: "space-between", flexWrap: "wrap" }}>
+              <span>الكود المطبّق: <b dir="ltr">{inv.discountCode}</b>{inv.marketer && inv.marketer.name ? ` — المسوّق: ${inv.marketer.name}` : ""}{inv.codeNoDiscount ? " — بدون خصم للعميل" : ""}</span>
+              <button type="button" className="btn-ghost" onClick={removeCode}>إزالة الكود</button>
+            </div>
+          ) : (
+            <div className="form-row">
+              <Field label="الكود"><input dir="ltr" value={codeInput} onChange={(e) => setCodeInput(e.target.value.toUpperCase())} placeholder="مثال: ALI10" /></Field>
+              <div style={{ display: "flex", alignItems: "flex-end", gap: 8, flexWrap: "wrap" }}>
+                <button type="button" className="btn-primary" disabled={codeBusy || !codeInput.trim()} onClick={() => applyCode(false)}>{codeBusy ? "جاري التحقق…" : "تطبيق الكود"}</button>
+                <button type="button" className="btn-ghost" disabled={codeBusy || !codeInput.trim()} onClick={() => applyCode(true)} title="يُحتسب للمسوّق بدون أي خصم للعميل">للمسوّق فقط (بدون خصم)</button>
+              </div>
+            </div>
+          )}
+          {codeMsg.text && <p className="field-hint" style={{ color: codeMsg.ok ? "var(--success)" : "var(--danger)", marginTop: 6 }}>{codeMsg.text}</p>}
+
           <div className="sub-head">خصم على الفاتورة كاملة (اختياري)</div>
           <div className="form-row">
             <Field label="نوع الخصم">
@@ -3040,13 +3166,22 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
           </div>
 
           <Field label="رسوم الشحن (اختياري)" hint="مبلغ الشحن اللي يدفعه العميل — ما يدخل في الإيراد ولا الضريبة ولا الربح، لكنه يظهر في الفاتورة ويدخل رصيد الحساب"><input type="number" min="0" value={inv.shippingFee ?? ""} onChange={(e) => set("shippingFee", e.target.value)} /></Field>
+          <div className="sub-head">حالة الدفع</div>
+          <label className="check-inline" style={{ margin: "4px 0 8px" }}>
+            <input type="checkbox" checked={!!inv.unpaid} onChange={(e) => setInv({ ...inv, unpaid: e.target.checked, dueDate: e.target.checked ? inv.dueDate : "" })} /> فاتورة على الحساب (لم تُدفع بعد)
+          </label>
+          {inv.unpaid ? (
+            <>
+              <Field label="تاريخ الاستحقاق (اختياري)" hint="يظهر بالفاتورة المطبوعة. المبلغ ما يدخل البنك/الكاش إلا لما تسجّل الدفع."><input type="date" value={inv.dueDate || ""} onChange={(e) => set("dueDate", e.target.value)} /></Field>
+            </>
+          ) : null}
           <Field label="ملاحظات (اختياري)"><textarea rows={2} value={inv.note} onChange={(e) => set("note", e.target.value)} /></Field>
 
           <div className="calc-summary">
             <div><span>المجموع قبل خصم الفاتورة</span><strong>{fmt(computed.subtotal)} ر.ع</strong></div>
             <div><span>خصم الفاتورة</span><strong className="neg">{fmt(computed.invoiceDiscountAmount)} ر.ع</strong></div>
             {computed.shipping > 0 && <div><span>الشحن (يدفعه العميل لشركة الشحن)</span><strong>{fmt(computed.shipping)} ر.ع</strong></div>}
-            <div><span>الإجمالي النهائي (المدفوع)</span><strong>{fmt(computed.totalPaid)} ر.ع</strong></div>
+            <div><span>{inv.unpaid ? "المبلغ المستحق (غير مدفوع)" : "الإجمالي النهائي (المدفوع)"}</span><strong>{fmt(computed.totalPaid)} ر.ع</strong></div>
           </div>
         </div>
         <div className="modal-foot">
@@ -3674,7 +3809,7 @@ function OffersTab() {
   );
 }
 
-function MarketersTab() {
+function MarketersTab({ data }) {
   const thisMonth = () => muscatDate(new Date().toISOString()).slice(0, 7);
   const [month, setMonth] = useState(thisMonth());
   const [state, setState] = useState({ loading: true, error: "", rows: [] });
@@ -3696,10 +3831,30 @@ function MarketersTab() {
     setMonth(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`);
   }
 
+  // فواتير يدوية (من البرنامج) عليها كود مسوّق — تنضم لتقرير الموقع (فواتير الموقع المسحوبة تُستثنى لأنها محسوبة من الموقع)
+  const manualRows = useMemo(() => {
+    const by = new Map();
+    ((data && data.invoices) || []).forEach((inv) => {
+      if (inv.source === "website" || isVoid(inv) || inv.unpaid) return;
+      if (!inv.marketer || !inv.marketer.name) return;
+      if (String(inv.date || "").slice(0, 7) !== month) return;
+      const key = (inv.marketer.code || "") + "|" + inv.marketer.name;
+      const c = invoiceComputed(inv);
+      const r = by.get(key) || { marketer: inv.marketer.name, code: inv.marketer.code || inv.discountCode || "", orders: 0, units: 0, customers: 0, sales: 0, commission: 0, mixed: false, _cust: new Set() };
+      r.orders += 1;
+      r.units += c.items.reduce((n, it) => n + (it.free ? 0 : it.qty), 0);
+      r._cust.add((inv.customerPhone || inv.customerName || inv.id));
+      r.sales += c.grandTotal;
+      r.commission += invoiceCommission(inv);
+      by.set(key, r);
+    });
+    return [...by.values()].map((r) => ({ ...r, customers: r._cust.size, sales: r3(r.sales), commission: r3(r.commission) }));
+  }, [data, month]);
+
   // نجمّع حسب المسوّق (لو عنده أكثر من كود)
   const grouped = useMemo(() => {
     const map = new Map();
-    for (const r of state.rows) {
+    for (const r of [...state.rows, ...manualRows]) {
       const g = map.get(r.marketer) || { marketer: r.marketer, codes: [], orders: 0, units: 0, customers: 0, sales: 0, commission: 0, hasCommission: false, mixed: false };
       g.codes.push(r.code);
       if (r.mixed) g.mixed = true;
@@ -3708,7 +3863,7 @@ function MarketersTab() {
       map.set(r.marketer, g);
     }
     return [...map.values()].sort((a, b) => b.orders - a.orders);
-  }, [state.rows]);
+  }, [state.rows, manualRows]);
   const totals = grouped.reduce((t, g) => ({ orders: t.orders + g.orders, sales: t.sales + g.sales, commission: t.commission + g.commission }), { orders: 0, sales: 0, commission: 0 });
 
   function downloadCsv() {
@@ -3853,9 +4008,9 @@ function shippingLedger(data, extraGross = 0) {
     const acc = methodAccount(data.settings, inv.paymentMethod);
     if (!acc) return;
     if (!countsInAccounts(inv)) return;
-    if (since[acc] && String(inv.date) < since[acc]) return;
+    if (since[acc] && String(cashDate(inv)) < since[acc]) return;
     const c = invoiceComputed(inv);
-    let settled = true, date = inv.date, account = acc === "cash" ? "cash" : shipAcc;
+    let settled = true, date = cashDate(inv), account = acc === "cash" ? "cash" : shipAcc;
     if (acc === "thawani") {
       cum += c.totalPaid;
       settled = cum <= settledTotal + 0.0005;
@@ -3878,15 +4033,15 @@ function accountBalances(data) {
   const since = openingSince(txns);
   ACCOUNTS.forEach((a) => {
     const o = txns.filter((t) => t.kind === "opening" && t.account === a.id).sort((x, y) => String(y.date).localeCompare(String(x.date)))[0];
-    if (o) bal[a.id] += Number(o.amount) || 0;
+    if (o) bal[a.id] += r3(o.amount);
   });
   let refunds = 0;
   data.invoices.forEach((inv) => {
     const acc = methodAccount(data.settings, inv.paymentMethod);
     if (!acc || !bal.hasOwnProperty(acc)) return;
     if (!countsInAccounts(inv)) return;
-    if (since[acc] && String(inv.date) < since[acc]) return;
-    const g = invoiceComputed(inv).totalPaid || 0;
+    if (since[acc] && String(cashDate(inv)) < since[acc]) return;
+    const g = r3(invoiceComputed(inv).totalPaid || 0);
     sales[acc] += g; bal[acc] += g;
     const rf = voidRefund(inv);
     if (rf > 0) {
@@ -3895,22 +4050,23 @@ function accountBalances(data) {
       if (bal.hasOwnProperty(ra) && !(since[ra] && String(rd) < since[ra])) { bal[ra] -= rf; refunds += rf; }
     }
   });
-  txns.filter((t) => t.kind !== "opening").forEach((t) => txnEffects(t).forEach((e) => { if (bal.hasOwnProperty(e.acc)) bal[e.acc] += e.amt; }));
+  txns.filter((t) => t.kind !== "opening").forEach((t) => txnEffects(t).forEach((e) => { if (bal.hasOwnProperty(e.acc)) bal[e.acc] += r3(e.amt); }));
   // المصروفات اليدوية + مصاريف الشحن التلقائية المخصومة
   const manual = (data.expenses || []);
-  manual.forEach((x) => { if (bal.hasOwnProperty(x.account)) bal[x.account] -= Number(x.amount) || 0; });
+  manual.forEach((x) => { if (bal.hasOwnProperty(x.account)) bal[x.account] -= r3(x.amount); });
   // مشتريات / تسويق / معدات / تأسيس المربوطة بحساب
   let linked = 0;
   linkedOutflows(data).forEach((o) => {
     if (!bal.hasOwnProperty(o.account)) return;
     if (since[o.account] && String(o.date) < since[o.account]) return;
-    bal[o.account] -= o.amount; linked += o.amount;
+    bal[o.account] -= r3(o.amount); linked += r3(o.amount);
   });
   const ship = shippingLedger(data);
   let shipOut = 0, shipPending = 0;
-  ship.forEach((r) => { if (r.deducted) { bal[r.account] -= r.amount; shipOut += r.amount; } else if (!r.settled) shipPending += r.amount; });
+  ship.forEach((r) => { if (r.deducted) { bal[r.account] -= r3(r.amount); shipOut += r3(r.amount); } else if (!r.settled) shipPending += r.amount; });
   const fees = txns.filter((t) => t.kind === "settlement").reduce((sum, t) => sum + settlementFee(t), 0);
-  return { bal, sales, since, fees, shipOut, shipPending, refunds, linked };
+  Object.keys(bal).forEach((k) => { bal[k] = r3(bal[k]); sales[k] = r3(sales[k]); });
+  return { bal, sales, since, fees: r3(fees), shipOut: r3(shipOut), shipPending: r3(shipPending), refunds: r3(refunds), linked: r3(linked) };
 }
 
 function AccountsTab({ data, persist, currentUser }) {
