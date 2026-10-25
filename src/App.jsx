@@ -4127,6 +4127,13 @@ function AccountsTab({ data, persist, currentUser }) {
   const linked = useMemo(() => linkedOutflows(data).filter((o) => !(info.since[o.account] && String(o.date) < info.since[o.account])).sort((a, b) => String(b.date).localeCompare(String(a.date))), [data, info]);
   const refundedInv = data.invoices.filter((i) => voidRefund(i) > 0);
   const stmtDiff = stmt === "" ? null : Number(stmt) - info.bal.sohar;
+  const receivables = data.invoices.filter(isUnpaid).sort((a, b) => String(a.dueDate || a.date).localeCompare(String(b.dueDate || b.date)));
+  const receivablesTotal = r3(receivables.reduce((x, i) => x + invoiceComputed(i).totalPaid, 0));
+  const [payingAcc, setPayingAcc] = useState(null);
+  function confirmPayAcc(inv, p) {
+    persist({ ...data, invoices: data.invoices.map((i) => (i.id === inv.id ? { ...i, unpaid: false, wasOnAccount: true, paidDate: p.date, paymentMethod: p.method, paidBy: currentUser?.name } : i)) });
+    setPayingAcc(null);
+  }
 
   return (
     <div className="page">
@@ -4155,12 +4162,44 @@ function AccountsTab({ data, persist, currentUser }) {
             <div className="kpi-value">{fmt(info.refunds)} <span className="unit">ر.ع</span></div>
           </div>
         )}
+        <div className="kpi-card" style={{ "--accent": "#b4541a" }}>
+          <div className="kpi-label">مستحقات على الحساب (لم تُدفع)</div>
+          <div className="kpi-value">{fmt(receivablesTotal)} <span className="unit">ر.ع</span></div>
+          <div className="panel-sub">{receivables.length} فاتورة — غير داخلة بالأرصدة</div>
+        </div>
         <div className="kpi-card" style={{ "--accent": "#3D6B8C" }}>
           <div className="kpi-label">شحن مخصوم من الحسابات</div>
           <div className="kpi-value">{fmt(info.shipOut)} <span className="unit">ر.ع</span></div>
           {info.shipPending > 0 && <div className="panel-sub">شحن بانتظار تسوية ثواني: {fmt(info.shipPending)} ر.ع</div>}
         </div>
       </div>
+
+      <div className="panel">
+        <div className="panel-head"><h3>الفواتير على الحساب (الدفع الآجل)</h3><span className="panel-sub">المبلغ ما يدخل البنك/الكاش إلا لما تسجّل الدفع</span></div>
+        {receivables.length === 0 ? (
+          <p className="field-hint">ما فيه فواتير آجلة غير مدفوعة حالياً.</p>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>الفاتورة</th><th>العميل</th><th>التاريخ</th><th>الاستحقاق</th><th>المبلغ المستحق</th><th></th></tr></thead>
+              <tbody>
+                {receivables.map((i) => (
+                  <tr key={i.id}>
+                    <td>#{i.number}</td>
+                    <td>{i.customerName || "—"}{i.customerPhone ? <div className="panel-sub" dir="ltr" style={{ textAlign: "right" }}>{i.customerPhone}</div> : null}</td>
+                    <td>{i.date}</td>
+                    <td>{i.dueDate ? <span style={{ color: i.dueDate < today ? "var(--danger)" : "inherit" }}>{i.dueDate}{i.dueDate < today ? " (متأخرة)" : ""}</span> : "—"}</td>
+                    <td><strong>{fmt(invoiceComputed(i).totalPaid)} ر.ع</strong></td>
+                    <td><button className="btn-primary" onClick={() => { if (isLocked(data, today)) { alert(lockMsg(data)); return; } setPayingAcc(i); }}>تسجيل الدفع</button></td>
+                  </tr>
+                ))}
+                <tr style={{ fontWeight: 700 }}><td colSpan={4}>الإجمالي</td><td>{fmt(receivablesTotal)} ر.ع</td><td></td></tr>
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+      {payingAcc && <PayInvoiceModal invoice={payingAcc} methods={methods} onCancel={() => setPayingAcc(null)} onConfirm={(p) => confirmPayAcc(payingAcc, p)} />}
 
       <div className="panel">
         <div className="panel-head"><h3>1) الرصيد الافتتاحي (مرة وحدة)</h3><span className="panel-sub">اكتب الرصيد الحالي اليوم، وما بعد كذا البرنامج يكمل لحاله. المبيعات قبل تاريخ الافتتاحي ما تنحسب.</span></div>
