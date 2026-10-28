@@ -230,8 +230,12 @@ function soldQtyExcludingInvoice(data, productId, excludeInvoiceId) {
   });
   return qty;
 }
+// حملة إعلانية مع منتجات: items = [{productId, qty, cost}] + fee (مبلغ نقدي للمعلن)
+const collabItemsCost = (m) => (m.items || []).reduce((s, it) => s + (Number(it.cost) || 0), 0);
 function sampledQty(data, productId) {
-  return data.marketing.filter((m) => m.type === "sample" && m.productId === productId).reduce((s, m) => s + (Number(m.qty) || 0), 0);
+  const samples = data.marketing.filter((m) => m.type === "sample" && m.productId === productId).reduce((s, m) => s + (Number(m.qty) || 0), 0);
+  const collab = data.marketing.filter((m) => m.type === "collab").reduce((s, m) => s + (m.items || []).filter((it) => it.productId === productId).reduce((x, it) => x + (Number(it.qty) || 0), 0), 0);
+  return samples + collab;
 }
 function lostQty(data, productId) {
   return data.losses.filter((l) => l.productId === productId).reduce((s, l) => s + (Number(l.qty) || 0), 0);
@@ -609,12 +613,13 @@ function productRevenueQty(data, productId) {
 
 function computeAllProductAgg(data) {
   const totalRevenue = data.products.reduce((s, p) => s + productRevenueQty(data, p.id).revenue, 0);
-  const totalGeneralMarketing = data.marketing.filter((m) => !m.productId).reduce((s, m) => s + (Number(m.cost) || 0), 0);
+  const totalGeneralMarketing = data.marketing.filter((m) => m.type === "collab" || !m.productId).reduce((s, m) => s + (m.type === "collab" ? (Number(m.fee) || 0) : (Number(m.cost) || 0)), 0);
   return data.products.map((p) => {
     const { qty, revenue, commission, vat } = productRevenueQty(data, p.id);
     const ref = productReferenceCost(data, p.id);
     const cogs = qty * ref.unitCost;
-    const direct = data.marketing.filter((m) => m.productId === p.id).reduce((s, m) => s + (Number(m.cost) || 0), 0);
+    const direct = data.marketing.filter((m) => m.type !== "collab" && m.productId === p.id).reduce((s, m) => s + (Number(m.cost) || 0), 0)
+      + data.marketing.filter((m) => m.type === "collab").reduce((s, m) => s + (m.items || []).filter((it) => it.productId === p.id).reduce((x, it) => x + (Number(it.cost) || 0), 0), 0);
     const allocatedGeneral = totalRevenue > 0 ? totalGeneralMarketing * (revenue / totalRevenue) : 0;
     const marketingTotal = direct + allocatedGeneral;
     const lossesTotal = data.losses.filter((l) => l.productId === p.id).reduce((s, l) => s + (Number(l.costTotal) || 0), 0);
@@ -700,7 +705,7 @@ function VatPaidField({ value, onChange }) {
 function linkedOutflows(data) {
   const out = [];
   (data.purchases || []).forEach((p) => { if (p.paidFrom) out.push({ id: p.id, kind: "شراء مواد", title: `شراء #${p.number}${p.note ? " — " + p.note : ""}`, date: p.date, amount: purchaseTotal(p), account: p.paidFrom }); });
-  (data.marketing || []).forEach((m) => { if (m.paidFrom && m.type !== "sample") out.push({ id: m.id, kind: "تسويق", title: m.title, date: m.date, amount: Number(m.cost) || 0, account: m.paidFrom }); });
+  (data.marketing || []).forEach((m) => { if (m.type === "collab") { if (m.paidFrom && Number(m.fee) > 0) out.push({ id: m.id, kind: "تسويق", title: m.title + " (مبلغ للمعلن)", date: m.date, amount: Number(m.fee) || 0, account: m.paidFrom }); return; } if (m.paidFrom && m.type !== "sample") out.push({ id: m.id, kind: "تسويق", title: m.title, date: m.date, amount: Number(m.cost) || 0, account: m.paidFrom }); });
   (data.equipment || []).forEach((e) => { if (e.paidFrom) out.push({ id: e.id, kind: "معدات", title: e.title, date: e.date, amount: Number(e.cost) || 0, account: e.paidFrom }); });
   (data.branding || []).forEach((b) => { if (b.paidFrom) out.push({ id: b.id, kind: "تأسيس", title: b.title, date: b.date, amount: Number(b.cost) || 0, account: b.paidFrom }); });
   return out;
@@ -2222,7 +2227,7 @@ function ProductsTab({ data, persist, currentUser }) {
     const usedIn = [];
     if (data.invoices.some((i) => (i.items || []).some((it) => it.productId === id))) usedIn.push("فواتير بيع");
     if (data.batches.some((b) => b.productId === id)) usedIn.push("دفعات إنتاج");
-    if (data.marketing.some((m) => m.productId === id)) usedIn.push("سامبلات/تسويق");
+    if (data.marketing.some((m) => m.productId === id || (m.items || []).some((it) => it.productId === id))) usedIn.push("سامبلات/تسويق");
     if (data.losses.some((l) => l.productId === id)) usedIn.push("خسائر");
     if (usedIn.length) {
       setConfirmState({
@@ -3809,21 +3814,66 @@ function OffersTab() {
   );
 }
 
+function printMarketerStatement(groups, periodLabel, lang, single) {
+  const ar = lang === "ar";
+  const T = ar
+    ? { title: "كشف حساب مسوّق", titleAll: "كشف المسوّقين", marketer: "المسوّق", code: "الكود", period: "الفترة", date: "التاريخ", ref: "المرجع", src: "المصدر", web: "الموقع", manual: "فاتورة يدوية", units: "القطع", sales: "المبيعات", comm: "العمولة", total: "الإجمالي", orders: "الطلبات", totalComm: "إجمالي العمولة المستحقة", totalSales: "إجمالي المبيعات", cur: "ر.ع", note: "تشمل الطلبات المدفوعة فقط (الملغاة وغير المدفوعة مستثناة). المبيعات بدون الشحن.", none: "لا توجد طلبات بهذه الفترة" }
+    : { title: "Marketer Statement", titleAll: "Marketers Summary", marketer: "Marketer", code: "Code", period: "Period", date: "Date", ref: "Reference", src: "Source", web: "Website", manual: "Manual invoice", units: "Units", sales: "Sales", comm: "Commission", total: "Total", orders: "Orders", totalComm: "Total commission due", totalSales: "Total sales", cur: "OMR", note: "Paid orders only (cancelled and unpaid are excluded). Sales exclude shipping.", none: "No orders in this period" };
+  const L = PRINT_LABELS[lang];
+  const sumComm = groups.reduce((n, g) => n + (g.hasCommission ? g.commission : 0), 0);
+  const sumSales = groups.reduce((n, g) => n + g.sales, 0);
+  let body = "";
+  if (single && groups[0]) {
+    const g = groups[0];
+    const list = [...(g.list || [])].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    const rows = list.map((x) => `<tr><td class="c-item"><bdi>${escHtml(x.date)}</bdi></td><td class="c-item"><bdi>${escHtml(x.ref)}</bdi><div class="sub">${x.manual ? T.manual : T.web}</div></td><td class="c-qty"><bdi>${x.units}</bdi></td><td class="c-num"><bdi>${fmt(x.sales)}</bdi></td><td class="c-num"><bdi>${x.commission == null ? "—" : fmt(x.commission)}</bdi></td></tr>`).join("");
+    body = `<div class="billed"><div class="eyebrow small">${T.marketer}</div><b>${escHtml(g.marketer)}</b><br>${T.code}: <bdi>${escHtml([...new Set(g.codes.filter(Boolean))].join(" + "))}</bdi><br>${T.period}: <bdi>${escHtml(periodLabel)}</bdi></div>
+      <table class="items"><thead><tr><th class="c-item">${T.date}</th><th class="c-item">${T.ref}</th><th class="c-qty">${T.units}</th><th class="c-num">${T.sales}</th><th class="c-num">${T.comm}</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="5" class="c-item">${T.none}</td></tr>`}</tbody></table>`;
+  } else {
+    const rows = groups.map((g) => `<tr><td class="c-item"><b>${escHtml(g.marketer)}</b><div class="sub"><bdi>${escHtml([...new Set(g.codes.filter(Boolean))].join(" + "))}</bdi></div></td><td class="c-qty"><bdi>${g.orders}</bdi></td><td class="c-qty"><bdi>${g.units}</bdi></td><td class="c-num"><bdi>${fmt(g.sales)}</bdi></td><td class="c-num"><bdi>${g.hasCommission ? fmt(g.commission) : "—"}</bdi></td></tr>`).join("");
+    body = `<div class="billed"><div class="eyebrow small">${T.period}</div><b><bdi>${escHtml(periodLabel)}</bdi></b></div>
+      <table class="items"><thead><tr><th class="c-item">${T.marketer}</th><th class="c-qty">${T.orders}</th><th class="c-qty">${T.units}</th><th class="c-num">${T.sales}</th><th class="c-num">${T.comm}</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  const html = `
+    <div class="inv-band"><div class="inv-logo">SILENT CODE</div><div class="inv-rule"></div></div>
+    <div class="sheet">
+      <table class="top"><tr><td class="top-start"><div class="eyebrow">${single ? T.title : T.titleAll}</div><div class="inv-no"><bdi>${escHtml(single && groups[0] ? groups[0].marketer : periodLabel)}</bdi></div></td><td class="top-end"></td></tr></table>
+      <table class="meta"><tr><td class="top-start">${L.dateLabel}: <span><bdi>${escHtml(muscatDate(new Date().toISOString()))}</bdi></span></td><td class="top-end"></td></tr></table>
+      ${body}
+      <table class="sumwrap"><tr><td class="sp"></td><td><table class="sums">
+        <tr class="sum"><td>${T.totalSales}</td><td class="c-num"><bdi>${fmt(sumSales)} ${T.cur}</bdi></td></tr>
+        <tr><td colspan="2" class="sum-rule"></td></tr>
+        <tr class="sum-strong"><td>${T.totalComm}</td><td class="c-num"><bdi>${fmt(sumComm)} ${T.cur}</bdi></td></tr>
+      </table></td></tr></table>
+      <div class="note">${T.note}</div>
+      <div class="foot"><div class="foot-thanks">${L.thanksBrand}</div><div class="foot-site">silentcodeofficial.com</div><div class="foot-legal">${L.legalLine}</div></div>
+    </div>`;
+  const nm = single && groups[0] ? groups[0].marketer : "All";
+  openPrintWindow(lang, html, invoiceStyles(lang), `${ar ? "كشف حساب" : "Statement"} - ${nm} - ${periodLabel.replace(/\s*→\s*/g, " to ")}`);
+}
+
 function MarketersTab({ data }) {
   const thisMonth = () => muscatDate(new Date().toISOString()).slice(0, 7);
   const [month, setMonth] = useState(thisMonth());
   const [state, setState] = useState({ loading: true, error: "", rows: [] });
+  const [mode, setMode] = useState("month"); // month | range
+  const [rFrom, setRFrom] = useState(() => muscatDate(new Date().toISOString()).slice(0, 7) + "-01");
+  const [rTo, setRTo] = useState(() => muscatDate(new Date().toISOString()));
+  const [selected, setSelected] = useState("");
+  const rangeOk = rFrom && rTo && rTo >= rFrom;
 
   async function load(m) {
+    if (mode === "range" && !rangeOk) { setState({ loading: false, error: "", rows: [] }); return; }
     setState((s) => ({ ...s, loading: true, error: "" }));
     try {
-      const r = await marketerReport(m);
+      const r = mode === "range" ? await marketerReport("", { from: rFrom, to: rTo, detail: true }) : await marketerReport(m, { detail: true });
       setState({ loading: false, error: "", rows: r.rows || [] });
     } catch (e) {
       setState({ loading: false, error: "تعذر جلب التقرير. تأكد من تحديث دالة accounting-orders وتشغيل ملف add_marketer_codes.sql. (" + (e.message || e) + ")", rows: [] });
     }
   }
-  useEffect(() => { load(month); }, [month]);
+  useEffect(() => { load(month); }, [month, mode, rFrom, rTo]);
 
   function shiftMonth(delta) {
     const [y, m] = month.split("-").map(Number);
@@ -3837,26 +3887,29 @@ function MarketersTab({ data }) {
     ((data && data.invoices) || []).forEach((inv) => {
       if (inv.source === "website" || isVoid(inv) || inv.unpaid) return;
       if (!inv.marketer || !inv.marketer.name) return;
-      if (String(inv.date || "").slice(0, 7) !== month) return;
+      const d = String(inv.date || "");
+      if (mode === "range" ? !(rangeOk && d >= rFrom && d <= rTo) : d.slice(0, 7) !== month) return;
       const key = (inv.marketer.code || "") + "|" + inv.marketer.name;
       const c = invoiceComputed(inv);
-      const r = by.get(key) || { marketer: inv.marketer.name, code: inv.marketer.code || inv.discountCode || "", orders: 0, units: 0, customers: 0, sales: 0, commission: 0, mixed: false, _cust: new Set() };
+      const r = by.get(key) || { marketer: inv.marketer.name, code: inv.marketer.code || inv.discountCode || "", orders: 0, units: 0, customers: 0, sales: 0, commission: 0, mixed: false, _cust: new Set(), list: [] };
       r.orders += 1;
       r.units += c.items.reduce((n, it) => n + (it.free ? 0 : it.qty), 0);
       r._cust.add((inv.customerPhone || inv.customerName || inv.id));
       r.sales += c.grandTotal;
       r.commission += invoiceCommission(inv);
+      r.list.push({ date: d, ref: "#" + inv.number, units: c.items.reduce((n, it) => n + (it.free ? 0 : it.qty), 0), sales: c.grandTotal, commission: r3(invoiceCommission(inv)), manual: true });
       by.set(key, r);
     });
     return [...by.values()].map((r) => ({ ...r, customers: r._cust.size, sales: r3(r.sales), commission: r3(r.commission) }));
-  }, [data, month]);
+  }, [data, month, mode, rFrom, rTo, rangeOk]);
 
   // نجمّع حسب المسوّق (لو عنده أكثر من كود)
   const grouped = useMemo(() => {
     const map = new Map();
     for (const r of [...state.rows, ...manualRows]) {
-      const g = map.get(r.marketer) || { marketer: r.marketer, codes: [], orders: 0, units: 0, customers: 0, sales: 0, commission: 0, hasCommission: false, mixed: false };
+      const g = map.get(r.marketer) || { marketer: r.marketer, codes: [], orders: 0, units: 0, customers: 0, sales: 0, commission: 0, hasCommission: false, mixed: false, list: [] };
       g.codes.push(r.code);
+      (r.list || []).forEach((x) => g.list.push({ ...x, date: x.manual ? x.date : muscatDate(x.date) }));
       if (r.mixed) g.mixed = true;
       g.orders += r.orders; g.units += r.units || 0; g.customers += r.customers; g.sales += r.sales;
       if (r.commission != null) { g.commission += r.commission; g.hasCommission = true; }
@@ -3864,11 +3917,13 @@ function MarketersTab({ data }) {
     }
     return [...map.values()].sort((a, b) => b.orders - a.orders);
   }, [state.rows, manualRows]);
-  const totals = grouped.reduce((t, g) => ({ orders: t.orders + g.orders, sales: t.sales + g.sales, commission: t.commission + g.commission }), { orders: 0, sales: 0, commission: 0 });
+  const shown = selected ? grouped.filter((g) => g.marketer === selected) : grouped;
+  const periodLabel = mode === "range" ? `${rFrom} → ${rTo}` : `${month}`;
+  const totals = shown.reduce((t, g) => ({ orders: t.orders + g.orders, sales: t.sales + g.sales, commission: t.commission + g.commission }), { orders: 0, sales: 0, commission: 0 });
 
   function downloadCsv() {
     const lines = [["المسوّق", "الأكواد", "عدد الطلبات", "عدد القطع", "عدد العملاء", "المبيعات (ر.ع)", "العمولة (ر.ع)"]];
-    for (const g of grouped) lines.push([g.marketer, g.codes.join(" + "), g.orders, g.units, g.customers, g.sales.toFixed(3), g.hasCommission ? g.commission.toFixed(3) : ""]);
+    for (const g of shown) lines.push([g.marketer, g.codes.join(" + "), g.orders, g.units, g.customers, g.sales.toFixed(3), g.hasCommission ? g.commission.toFixed(3) : ""]);
     const csv = "﻿" + lines.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const a = document.createElement("a");
@@ -3887,24 +3942,43 @@ function MarketersTab({ data }) {
         desc="لإنشاء كود لمسوّق: روح «العروض والخصومات» وأضف كود جديد واكتب اسم المسوّق ونسبة عمولته. هنا تشوف كل شهر كم طلب وعميل جابهم وكم عمولته. الطلبات الملغية لا تُحسب."
       />
       <div className="panel">
+        <div className="period-bar" style={{ marginBottom: 12 }}>
+          <button className={`chip-btn ${mode === "month" ? "on" : ""}`} onClick={() => setMode("month")}>شهر</button>
+          <button className={`chip-btn ${mode === "range" ? "on" : ""}`} onClick={() => setMode("range")}>فترة مخصصة (من – إلى)</button>
+          <select value={selected} onChange={(e) => setSelected(e.target.value)} style={{ minWidth: 160 }}>
+            <option value="">كل المسوّقين</option>
+            {grouped.map((g) => <option key={g.marketer} value={g.marketer}>{g.marketer}</option>)}
+          </select>
+        </div>
+        {mode === "range" && (
+          <div className="form-row" style={{ marginBottom: 12 }}>
+            <Field label="من تاريخ"><input type="date" value={rFrom} onChange={(e) => setRFrom(e.target.value)} /></Field>
+            <Field label="إلى تاريخ"><input type="date" value={rTo} onChange={(e) => setRTo(e.target.value)} /></Field>
+            {!rangeOk && <p className="field-hint" style={{ color: "var(--danger)", alignSelf: "flex-end" }}>تاريخ النهاية لازم يكون بعد البداية.</p>}
+          </div>
+        )}
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
-          <button className="btn-ghost" onClick={() => shiftMonth(-1)}>الشهر السابق</button>
-          <strong style={{ minWidth: 120, textAlign: "center" }}>{MONTHS[mm - 1]} {yy}</strong>
-          <button className="btn-ghost" onClick={() => shiftMonth(1)} disabled={month >= thisMonth()}>الشهر التالي</button>
+          {mode === "month" && <>
+            <button className="btn-ghost" onClick={() => shiftMonth(-1)}>الشهر السابق</button>
+            <strong style={{ minWidth: 120, textAlign: "center" }}>{MONTHS[mm - 1]} {yy}</strong>
+            <button className="btn-ghost" onClick={() => shiftMonth(1)} disabled={month >= thisMonth()}>الشهر التالي</button>
+          </>}
           <span style={{ flex: 1 }} />
-          <button className="btn-ghost" onClick={downloadCsv} disabled={!grouped.length}>تنزيل Excel (CSV)</button>
+          <button className="btn-primary" disabled={!shown.length} onClick={() => printMarketerStatement(shown, periodLabel, "ar", !!selected)}><Printer size={15} /> طباعة كشف {selected ? "المسوّق" : "المسوّقين"} AR</button>
+          <button className="btn-ghost" disabled={!shown.length} onClick={() => printMarketerStatement(shown, periodLabel, "en", !!selected)}><Printer size={15} /> EN</button>
+          <button className="btn-ghost" onClick={downloadCsv} disabled={!shown.length}>تنزيل Excel (CSV)</button>
         </div>
         {state.error && <div className="alert-banner"><AlertCircle size={15} /> {state.error}</div>}
         {state.loading && !state.error && <div style={{ color: "var(--ink-soft)" }}>جاري التحميل...</div>}
-        {!state.loading && !state.error && grouped.length === 0 && (
+        {!state.loading && !state.error && shown.length === 0 && (
           <div style={{ color: "var(--ink-soft)" }}>ما في مسوّقين بعد. أضف كود بإسم مسوّق من «العروض والخصومات».</div>
         )}
-        {!state.loading && !state.error && grouped.length > 0 && (
+        {!state.loading && !state.error && shown.length > 0 && (
           <div className="table-wrap">
             <table>
               <thead><tr><th>المسوّق</th><th>الكود</th><th>الطلبات</th><th>القطع</th><th>العملاء</th><th>المبيعات (ر.ع)</th><th>العمولة (ر.ع)</th></tr></thead>
               <tbody>
-                {grouped.map((g) => (
+                {shown.map((g) => (
                   <tr key={g.marketer}>
                     <td><strong>{g.marketer}</strong></td>
                     <td dir="ltr" style={{ textAlign: "right" }}>{g.codes.join(" + ")}{g.mixed && <div style={{ fontSize: 11, color: "var(--ink-soft)", direction: "rtl" }}>العمولة تغيّرت خلال الشهر (كل طلب بشرطه وقت الشراء)</div>}</td>
@@ -3916,7 +3990,7 @@ function MarketersTab({ data }) {
                   </tr>
                 ))}
                 <tr style={{ fontWeight: 700 }}>
-                  <td>الإجمالي</td><td></td><td>{totals.orders}</td><td>{grouped.reduce((n, g) => n + g.units, 0)}</td><td></td><td>{fmt(totals.sales)}</td><td>{fmt(totals.commission)}</td>
+                  <td>الإجمالي</td><td></td><td>{totals.orders}</td><td>{shown.reduce((n, g) => n + g.units, 0)}</td><td></td><td>{fmt(totals.sales)}</td><td>{fmt(totals.commission)}</td>
                 </tr>
               </tbody>
             </table>
@@ -4612,13 +4686,42 @@ function MarketingTab({ data, persist, currentUser }) {
     const next = { ...form, [field]: val };
     if (field === "type" && val === "campaign") next.qty = "";
     if (field === "type" && val === "sample") { next.paidFrom = ""; next.vat = ""; }
+    if (field === "type" && val === "collab") { next.items = next.items && next.items.length ? next.items : [{ id: uid("ci"), productId: "", qty: "", cost: "" }]; next.fee = next.fee || ""; next.productId = ""; next.qty = ""; next.cost = ""; if (!next.paidFrom) next.paidFrom = "sohar"; }
     if ((field === "productId" || field === "qty") && next.type === "sample") {
       const ref = productReferenceCost(data, next.productId);
       if (next.productId && next.qty) next.cost = (ref.unitCost * Number(next.qty)).toFixed(3);
     }
     setForm(next);
   }
+  const isCollab = form.type === "collab";
+  function setCItem(id, field, val) {
+    const items = (form.items || []).map((it) => {
+      if (it.id !== id) return it;
+      const n = { ...it, [field]: val };
+      if (field === "productId" || field === "qty") {
+        const ref = n.productId ? productReferenceCost(data, n.productId) : null;
+        n.cost = ref && Number(n.qty) > 0 ? r3(ref.unitCost * Number(n.qty)).toFixed(3) : "";
+      }
+      return n;
+    });
+    setForm({ ...form, items });
+  }
+  const cItems = (form.items || []).filter((it) => it.productId);
+  const cNeed = {};
+  cItems.forEach((it) => { cNeed[it.productId] = (cNeed[it.productId] || 0) + (Number(it.qty) || 0); });
+  const cShort = Object.keys(cNeed).filter((pid) => cNeed[pid] > availableToSell(data, pid)).map((pid) => data.products.find((p) => p.id === pid)?.name || "—");
+  const cItemsCost = r3(cItems.reduce((s, it) => s + (Number(it.cost) || 0), 0));
+  const cTotal = r3(cItemsCost + (Number(form.fee) || 0));
+  const collabBad = isCollab && (!form.title.trim() || (cItems.length === 0 && !(Number(form.fee) > 0)) || cItems.some((it) => !(Number(it.qty) > 0)) || cShort.length > 0);
   function add() {
+    if (isCollab) {
+      if (collabBad) return;
+      if (isLocked(data, form.date)) { alert(lockMsg(data)); return; }
+      const fee = Number(form.fee) || 0;
+      persist({ ...data, marketing: [...data.marketing, { id: form.id, date: form.date, type: "collab", title: form.title.trim(), items: cItems.map((it) => ({ id: it.id, productId: it.productId, qty: Number(it.qty), cost: Number(it.cost) || 0 })), fee, cost: cTotal, productId: "", qty: "", paidFrom: fee > 0 ? form.paidFrom : "", vat: fee > 0 ? form.vat : "", note: form.note || "", createdBy: currentUser?.name }] });
+      setForm(emptyMarketing());
+      return;
+    }
     if (!form.title.trim() || !form.cost) return;
     if (isLocked(data, form.date)) { alert(lockMsg(data)); return; }
     persist({ ...data, marketing: [...data.marketing, { ...form, title: form.title.trim(), createdBy: currentUser?.name }] });
@@ -4632,6 +4735,7 @@ function MarketingTab({ data, persist, currentUser }) {
 
   const totalCampaigns = data.marketing.filter((m) => m.type === "campaign").reduce((s, m) => s + (Number(m.cost) || 0), 0);
   const totalSamples = data.marketing.filter((m) => m.type === "sample").reduce((s, m) => s + (Number(m.cost) || 0), 0);
+  const totalCollab = data.marketing.filter((m) => m.type === "collab").reduce((s, m) => s + (Number(m.cost) || 0), 0);
 
   return (
     <div className="page">
@@ -4640,6 +4744,7 @@ function MarketingTab({ data, persist, currentUser }) {
       <div className="kpi-row">
         <div className="kpi-card" style={{ "--accent": "#3D6B8C" }}><Megaphone size={16} className="kpi-icon" /><div className="kpi-label">إجمالي الحملات</div><div className="kpi-value">{fmt(totalCampaigns)} <span className="unit">ر.ع</span></div></div>
         <div className="kpi-card" style={{ "--accent": "#8C6B3D" }}><Sparkles size={16} className="kpi-icon" /><div className="kpi-label">إجمالي تكلفة السامبلات</div><div className="kpi-value">{fmt(totalSamples)} <span className="unit">ر.ع</span></div></div>
+        <div className="kpi-card" style={{ "--accent": "#6B4C8C" }}><Megaphone size={16} className="kpi-icon" /><div className="kpi-label">حملات إعلانية مع منتجات</div><div className="kpi-value">{fmt(totalCollab)} <span className="unit">ر.ع</span></div></div>
       </div>
 
       <div className="panel">
@@ -4649,24 +4754,55 @@ function MarketingTab({ data, persist, currentUser }) {
             <select value={form.type} onChange={(e) => set("type", e.target.value)}>
               <option value="campaign">حملة تسويقية</option>
               <option value="sample">سامبل / عينة مجانية</option>
+              <option value="collab">حملة إعلانية مع منتجات + مبلغ للمعلن</option>
             </select>
           </Field>
-          <Field label="العنوان / الوصف"><input value={form.title} onChange={(e) => set("title", e.target.value)} placeholder="مثال: إعلان انستقرام" /></Field>
-          <Field label="المنتج (اختياري إن كانت حملة عامة)">
+          <Field label={isCollab ? "اسم المعلن / الحملة" : "العنوان / الوصف"}><input value={form.title} onChange={(e) => set("title", e.target.value)} placeholder={isCollab ? "مثال: إعلان مع فلان على انستقرام" : "مثال: إعلان انستقرام"} /></Field>
+          {!isCollab && <Field label="المنتج (اختياري إن كانت حملة عامة)">
             <select value={form.productId} onChange={(e) => set("productId", e.target.value)}>
               <option value="">عام - كل المنتجات</option>
               {data.products.map((p) => <option key={p.id} value={p.id}>{productLabel(p)}</option>)}
             </select>
-          </Field>
+          </Field>}
           {form.type === "sample" && <Field label="عدد السامبلات"><input type="number" value={form.qty} onChange={(e) => set("qty", e.target.value)} /></Field>}
-          <Field label="التكلفة (ر.ع)" hint={form.type === "sample" ? "تُحسب تلقائيًا من تكلفة المنتج، تقدر تعدلها" : ""}>
+          {!isCollab && <Field label="التكلفة (ر.ع)" hint={form.type === "sample" ? "تُحسب تلقائيًا من تكلفة المنتج، تقدر تعدلها" : ""}>
             <input type="number" value={form.cost} onChange={(e) => set("cost", e.target.value)} />
-          </Field>
+          </Field>}
+          {isCollab && <Field label="المبلغ النقدي للمعلن (ر.ع)" hint="اتركه فاضي لو بس منتجات"><input type="number" value={form.fee || ""} onChange={(e) => set("fee", e.target.value)} /></Field>}
           <Field label="التاريخ"><input type="date" value={form.date} onChange={(e) => set("date", e.target.value)} /></Field>
-          {form.type === "campaign" && <PaidFromField value={form.paidFrom} onChange={(v) => set("paidFrom", v)} />}
-          {form.type === "campaign" && <VatPaidField value={form.vat} onChange={(v) => set("vat", v)} />}
+          {(form.type === "campaign" || (isCollab && Number(form.fee) > 0)) && <PaidFromField value={form.paidFrom} onChange={(v) => set("paidFrom", v)} />}
+          {(form.type === "campaign" || (isCollab && Number(form.fee) > 0)) && <VatPaidField value={form.vat} onChange={(v) => set("vat", v)} />}
         </div>
-        <button className="btn-primary" onClick={add} disabled={!form.title.trim() || !form.cost}><Plus size={16} /> إضافة</button>
+        {isCollab && (
+          <div className="materials-list" style={{ marginBottom: 12 }}>
+            <div className="sub-head">المنتجات اللي تعطيها للمعلن (تنخصم من مخزون الدفعات بسعر التكلفة)</div>
+            {(form.items || []).map((it) => {
+              const avail = it.productId ? availableToSell(data, it.productId) : null;
+              return (
+                <div key={it.id}>
+                  <div className="invoice-item-row">
+                    <select value={it.productId} onChange={(e) => setCItem(it.id, "productId", e.target.value)}>
+                      <option value="">اختر منتج</option>
+                      {data.products.map((p) => <option key={p.id} value={p.id}>{productLabel(p)}</option>)}
+                    </select>
+                    <input type="number" min="0" value={it.qty} onChange={(e) => setCItem(it.id, "qty", e.target.value)} placeholder="الكمية" />
+                    <span className="num line-total">{it.cost ? fmt(it.cost) : "—"}</span>
+                    <button className="icon-btn danger" onClick={() => setForm({ ...form, items: form.items.filter((x) => x.id !== it.id) })}><Trash2 size={14} /></button>
+                  </div>
+                  {it.productId && <p className="field-hint" style={{ margin: "2px 0 6px" }}>المتوفر من الدفعات: {avail}</p>}
+                </div>
+              );
+            })}
+            <button className="link-btn" onClick={() => setForm({ ...form, items: [...(form.items || []), { id: uid("ci"), productId: "", qty: "", cost: "" }] })}><Plus size={14} /> إضافة منتج</button>
+            {cShort.length > 0 && <p className="form-problem">الكمية أكبر من المتوفر: {cShort.join("، ")}</p>}
+            <div className="calc-summary">
+              <div><span>تكلفة المنتجات (من الدفعات)</span><strong>{fmt(cItemsCost)} ر.ع</strong></div>
+              <div><span>المبلغ النقدي</span><strong>{fmt(Number(form.fee) || 0)} ر.ع</strong></div>
+              <div><span>إجمالي تكلفة الحملة</span><strong>{fmt(cTotal)} ر.ع</strong></div>
+            </div>
+          </div>
+        )}
+        <button className="btn-primary" onClick={add} disabled={isCollab ? collabBad : (!form.title.trim() || !form.cost)}><Plus size={16} /> إضافة</button>
       </div>
 
       {data.marketing.length === 0 ? (
@@ -4681,11 +4817,11 @@ function MarketingTab({ data, persist, currentUser }) {
                 return (
                   <tr key={m.id}>
                     <td>{m.date}</td>
-                    <td><span className={`badge ${m.type === "sample" ? "amber" : "blue"}`}>{m.type === "sample" ? "سامبل" : "حملة"}</span></td>
-                    <td>{m.title}</td>
-                    <td>{prod ? prod.name : "عام"}</td>
-                    <td className="num">{m.qty || "—"}</td>
-                    <td className="num">{fmt(m.cost)} ر.ع{m.paidFrom ? <div className="panel-sub">من {accName(m.paidFrom)}</div> : null}</td>
+                    <td><span className={`badge ${m.type === "sample" ? "amber" : m.type === "collab" ? "green" : "blue"}`}>{m.type === "sample" ? "سامبل" : m.type === "collab" ? "حملة + منتجات" : "حملة"}</span></td>
+                    <td>{m.title}{m.type === "collab" && Number(m.fee) > 0 ? <div className="panel-sub">مبلغ نقدي {fmt(m.fee)} ر.ع من {accName(m.paidFrom)}</div> : null}</td>
+                    <td>{m.type === "collab" ? ((m.items || []).map((it) => data.products.find((p) => p.id === it.productId)?.name || "—").join("، ") || "—") : (prod ? prod.name : "عام")}</td>
+                    <td className="num">{m.type === "collab" ? ((m.items || []).reduce((n, it) => n + (Number(it.qty) || 0), 0) || "—") : (m.qty || "—")}</td>
+                    <td className="num">{fmt(m.cost)} ر.ع{m.type !== "collab" && m.paidFrom ? <div className="panel-sub">من {accName(m.paidFrom)}</div> : null}</td>
                     <td>{m.createdBy && <span className="badge green">{m.createdBy}</span>}</td>
                     <td><button className="icon-btn danger" onClick={() => remove(m.id)}><Trash2 size={14} /></button></td>
                   </tr>
