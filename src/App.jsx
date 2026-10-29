@@ -314,6 +314,24 @@ const PRINT_LABELS = {
 
 // الطباعة تكتب HTML بنافذة جديدة، فأي نص كتبه عميل أو موظف (اسم، عنوان، ملاحظة) لازم يتعقّم قبل ما ينحط فيها
 const escHtml = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+/* ---- الشحن: نفس نظام الموقع بالضبط (create-payment-session) — لو تغيّرت الأسعار هناك عدّلها هنا ---- */
+const SHIP_PERFUME_GRAMS = 674, SHIP_MAX_KG = 10;
+const SHIP_TABLE = { SA: [8, 10, 12, 13, 16, 19, 22, 25, 28, 31], OTHER: [5, 7, 10, 13, 16, 19, 22, 25, 27, 29] };
+const SHIP_MAX_PER = Math.floor((SHIP_MAX_KG * 1000) / SHIP_PERFUME_GRAMS);
+function shipOnePriceOmr(country, units) {
+  const kg = Math.min(SHIP_MAX_KG, Math.max(1, Math.ceil((units * SHIP_PERFUME_GRAMS) / 1000)));
+  if (country === "OM") return 2;
+  if (country === "AE") return kg <= 4 ? 4 : kg;
+  return (country === "SA" ? SHIP_TABLE.SA : SHIP_TABLE.OTHER)[kg - 1];
+}
+function shippingFeeOmr(country, totalUnits) {
+  const u = Math.floor(Number(totalUnits) || 0);
+  if (!country || u <= 0) return 0;
+  if (country === "OM") return 2;
+  const full = Math.floor(u / SHIP_MAX_PER), rest = u % SHIP_MAX_PER;
+  return (full > 0 ? full * shipOnePriceOmr(country, SHIP_MAX_PER) : 0) + (rest > 0 ? shipOnePriceOmr(country, rest) : 0);
+}
+const SHIP_REGIONS = {"OM": ["مسقط", "ظفار", "مسندم", "البريمي", "الداخلية", "شمال الباطنة", "جنوب الباطنة", "شمال الشرقية", "جنوب الشرقية", "الظاهرة", "الوسطى"], "SA": ["منطقة الرياض", "منطقة مكة المكرمة", "منطقة المدينة المنورة", "منطقة القصيم", "المنطقة الشرقية", "منطقة عسير", "منطقة تبوك", "منطقة حائل", "منطقة الحدود الشمالية", "منطقة جازان", "منطقة نجران", "منطقة الباحة", "منطقة الجوف"], "AE": ["أبوظبي", "دبي", "الشارقة", "عجمان", "أم القيوين", "رأس الخيمة", "الفجيرة"], "KW": ["مدينة الكويت", "حولي", "الفروانية", "مبارك الكبير", "الأحمدي", "الجهراء"], "BH": ["المنامة", "المحرق", "الشمالية", "الجنوبية"], "QA": ["الدوحة", "الريان", "الوكرة", "الخور والذخيرة", "الشمال", "الضعاين", "أم صلال", "الشحانية"]};
 const PRINT_COUNTRIES = {
   OM: { ar: "عُمان", en: "Oman" }, AE: { ar: "الإمارات", en: "United Arab Emirates" }, SA: { ar: "السعودية", en: "Saudi Arabia" },
   KW: { ar: "الكويت", en: "Kuwait" }, QA: { ar: "قطر", en: "Qatar" }, BH: { ar: "البحرين", en: "Bahrain" },
@@ -483,8 +501,9 @@ function printInvoiceNow(invoice, data, lang = "ar") {
     })
     .join("");
   const pay = invoice.paymentMethod ? escHtml(lang === "en" ? (PRINT_METHOD_EN[invoice.paymentMethod] || invoice.paymentMethod) : invoice.paymentMethod) : "";
+  const regionTxt = invoice.deliveryRegion && invoice.deliveryRegion !== "__other__" ? invoice.deliveryRegion : "";
   const addressLine = invoice.deliveryType === "delivery"
-    ? (invoice.deliveryAddress ? escHtml(invoice.deliveryAddress) : L.deliveryType)
+    ? ((regionTxt || invoice.deliveryAddress) ? escHtml([regionTxt, invoice.deliveryAddress].filter(Boolean).join(" — ")) : L.deliveryType)
     : L.pickup;
   const sumRow = (label, val, strong) => `<tr class="${strong ? "sum-strong" : "sum"}"><td>${label}</td><td class="c-num"><bdi>${val}</bdi></td></tr>`;
   const html = `
@@ -941,6 +960,7 @@ function LoginScreen({ onSignedIn }) {
 
 export default function CostingApp() {
   const [data, setData] = useState(null);
+  const [saveErr, setSaveErr] = useState("");
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("dashboard");
   const [authUser, setAuthUser] = useState(undefined); // undefined = not checked yet, null = signed out, object = signed in
@@ -997,12 +1017,14 @@ export default function CostingApp() {
     try {
       const merged = await saveAppData(prev, next, { replace: !!opts.replace });
       dirtyRef.current = false;
+      setSaveErr("");
       // لو الشريك الثاني غيّر شي بنفس الوقت، نعرضه عندنا (بشرط ما صار تعديل أحدث محليًا)
       if (dataRef.current === next && JSON.stringify(merged) !== JSON.stringify(next)) { dataRef.current = merged; setData(merged); }
       return true;
     } catch (e) {
       console.error("save error", e);
       dirtyRef.current = true;
+      setSaveErr(String((e && (e.code || e.message)) || e));
       return false;
     } finally {
       savingRef.current -= 1;
@@ -1359,6 +1381,12 @@ export default function CostingApp() {
       </aside>
 
       <main className="content">
+        {saveErr && (
+          <div className="alert-banner" style={{ background: "#FBE3E0", color: "var(--danger)", borderColor: "#F0B8B0", justifyContent: "space-between", flexWrap: "wrap", marginBottom: 12 }}>
+            <span><b>⚠️ فشل الحفظ — آخر تغيير ما انحفظ على السيرفر وراح يختفي بعد التحديث.</b> السبب: {saveErr}. تأكد من الإنترنت وحاول مرة ثانية، ولو تكرر صوّر لي هالرسالة.</span>
+            <button className="btn-ghost" onClick={() => setSaveErr("")}>إخفاء</button>
+          </div>
+        )}
         {tab === "dashboard" && <Dashboard data={vd} />}
         {tab === "materials" && <MaterialsTab data={vd} persist={pv} currentUser={currentUser} />}
         {tab === "purchaseLog" && <PurchaseLogTab data={vd} />}
@@ -2625,7 +2653,7 @@ function emptyInvoice(nextNo, defaultMethod) {
     id: uid("inv"), number: nextNo, date: todayStr(), customerName: "", customerPhone: "",
     paymentMethod: defaultMethod || "", note: "",
     discountType: "fixed", discountValue: "", unpaid: false, dueDate: "",
-    deliveryType: "pickup", deliveryAddress: "",
+    deliveryType: "pickup", deliveryAddress: "", customerCountry: "OM", deliveryRegion: "",
     overheadUsage: [],
     items: [{ id: uid("it"), productId: "", qty: 1, unitPrice: "", discount: "", free: false }],
   };
@@ -2917,6 +2945,17 @@ function VoidModal({ invoice, data, onCancel, onConfirm }) {
 function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, onClose }) {
   const [inv, setInv] = useState(invoice);
   function set(f, v) { setInv({ ...inv, [f]: v }); }
+  const [shipManual, setShipManual] = useState(false);
+  const firstShipRun = useRef(true);
+  const totalUnits = inv.items.reduce((n, it) => n + (it.productId ? (Number(it.qty) || 0) : 0), 0);
+  useEffect(() => {
+    if (firstShipRun.current) { firstShipRun.current = false; return; }
+    if (shipManual) return;
+    setInv((cur) => {
+      const fee = cur.deliveryType === "delivery" ? shippingFeeOmr(cur.customerCountry, totalUnits) : 0;
+      return String(cur.shippingFee ?? "") === String(fee || "") ? cur : { ...cur, shippingFee: fee || "" };
+    });
+  }, [inv.deliveryType, inv.customerCountry, totalUnits, shipManual]);
   const [codeInput, setCodeInput] = useState(invoice.discountCode || "");
   const [codeBusy, setCodeBusy] = useState(false);
   const [codeMsg, setCodeMsg] = useState({ ok: false, text: "" });
@@ -3066,7 +3105,24 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
               </select>
             </Field>
             {inv.deliveryType === "delivery" && (
-              <Field label="عنوان التوصيل"><input value={inv.deliveryAddress} onChange={(e) => set("deliveryAddress", e.target.value)} placeholder="الولاية / المنطقة / تفاصيل الموقع" /></Field>
+              <>
+                <Field label="الدولة" hint="تحدد رسوم الشحن تلقائيًا بنفس نظام الموقع">
+                  <select value={inv.customerCountry || ""} onChange={(e) => setInv({ ...inv, customerCountry: e.target.value, deliveryRegion: "" })}>
+                    <option value="">اختر الدولة</option>
+                    {Object.keys(PRINT_COUNTRIES).map((c) => <option key={c} value={c}>{PRINT_COUNTRIES[c].ar}</option>)}
+                  </select>
+                </Field>
+                {inv.customerCountry && (
+                  <Field label="المنطقة / المحافظة">
+                    <select value={inv.deliveryRegion || ""} onChange={(e) => set("deliveryRegion", e.target.value)}>
+                      <option value="">اختر</option>
+                      {(SHIP_REGIONS[inv.customerCountry] || []).map((r) => <option key={r} value={r}>{r}</option>)}
+                      <option value="__other__">أخرى (اكتبها بالعنوان)</option>
+                    </select>
+                  </Field>
+                )}
+                <Field label="تفاصيل العنوان"><input value={inv.deliveryAddress} onChange={(e) => set("deliveryAddress", e.target.value)} placeholder="الولاية / الحي / تفاصيل الموقع" /></Field>
+              </>
             )}
           </div>
 
@@ -3170,7 +3226,13 @@ function InvoiceEditor({ invoice, data, products, methods, allInvoices, onSave, 
             <Field label="قيمة الخصم"><input type="number" value={inv.discountValue} onChange={(e) => set("discountValue", e.target.value)} /></Field>
           </div>
 
-          <Field label="رسوم الشحن (اختياري)" hint="مبلغ الشحن اللي يدفعه العميل — ما يدخل في الإيراد ولا الضريبة ولا الربح، لكنه يظهر في الفاتورة ويدخل رصيد الحساب"><input type="number" min="0" value={inv.shippingFee ?? ""} onChange={(e) => set("shippingFee", e.target.value)} /></Field>
+          <Field label="رسوم الشحن (اختياري)" hint="مبلغ الشحن اللي يدفعه العميل — ما يدخل في الإيراد ولا الضريبة ولا الربح، لكنه يظهر في الفاتورة ويدخل رصيد الحساب"><input type="number" min="0" value={inv.shippingFee ?? ""} onChange={(e) => { setShipManual(true); set("shippingFee", e.target.value); }} /></Field>
+          {inv.deliveryType === "delivery" && (
+            <p className="field-hint" style={{ marginTop: -4 }}>
+              {inv.customerCountry ? (shipManual ? "الرسوم معدّلة يدويًا. " : `محسوبة تلقائيًا بنظام الموقع (${totalUnits} قطعة). `) : "اختر الدولة عشان تنحسب الرسوم تلقائيًا. "}
+              {shipManual && inv.customerCountry && <button type="button" className="link-btn" onClick={() => { setShipManual(false); }}>رجوع للحساب التلقائي</button>}
+            </p>
+          )}
           <div className="sub-head">حالة الدفع</div>
           <label className="check-inline" style={{ margin: "4px 0 8px" }}>
             <input type="checkbox" checked={!!inv.unpaid} onChange={(e) => setInv({ ...inv, unpaid: e.target.checked, dueDate: e.target.checked ? inv.dueDate : "" })} /> فاتورة على الحساب (لم تُدفع بعد)
@@ -3923,7 +3985,7 @@ function MarketersTab({ data }) {
 
   function downloadCsv() {
     const lines = [["المسوّق", "الأكواد", "عدد الطلبات", "عدد القطع", "عدد العملاء", "المبيعات (ر.ع)", "العمولة (ر.ع)"]];
-    for (const g of shown) lines.push([g.marketer, g.codes.join(" + "), g.orders, g.units, g.customers, g.sales.toFixed(3), g.hasCommission ? g.commission.toFixed(3) : ""]);
+    for (const g of shown) lines.push([g.marketer, [...new Set(g.codes.filter(Boolean))].join(" + "), g.orders, g.units, g.customers, g.sales.toFixed(3), g.hasCommission ? g.commission.toFixed(3) : ""]);
     const csv = "﻿" + lines.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const a = document.createElement("a");
@@ -3981,7 +4043,7 @@ function MarketersTab({ data }) {
                 {shown.map((g) => (
                   <tr key={g.marketer}>
                     <td><strong>{g.marketer}</strong></td>
-                    <td dir="ltr" style={{ textAlign: "right" }}>{g.codes.join(" + ")}{g.mixed && <div style={{ fontSize: 11, color: "var(--ink-soft)", direction: "rtl" }}>العمولة تغيّرت خلال الشهر (كل طلب بشرطه وقت الشراء)</div>}</td>
+                    <td dir="ltr" style={{ textAlign: "right" }}>{[...new Set(g.codes.filter(Boolean))].join(" + ")}{g.mixed && <div style={{ fontSize: 11, color: "var(--ink-soft)", direction: "rtl" }}>العمولة تغيّرت خلال الشهر (كل طلب بشرطه وقت الشراء)</div>}</td>
                     <td>{g.orders}</td>
                     <td>{g.units}</td>
                     <td>{g.customers}</td>
@@ -4086,9 +4148,7 @@ function shippingLedger(data, extraGross = 0) {
     const c = invoiceComputed(inv);
     let settled = true, date = cashDate(inv), account = acc === "cash" ? "cash" : shipAcc;
     if (acc === "thawani") {
-      cum += c.totalPaid;
-      settled = cum <= settledTotal + 0.0005;
-      date = settled ? settleDateFor(cum) : "";
+      // الشحن يُدفع لشركة التوصيل مقدمًا من صحار، فينخصم بتاريخ الفاتورة (مو بانتظار تسوية ثواني)
       account = shipAcc;
     }
     if (isVoid(inv)) return; // الملغاة: ما يتسجل لها مصروف شحن
