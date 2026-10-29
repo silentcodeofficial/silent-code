@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getFirestore, doc, getDoc, setDoc, collection, getDocs, runTransaction } from "firebase/firestore";
+import { initializeFirestore, doc, getDoc, setDoc, collection, getDocs, runTransaction } from "firebase/firestore";
 import {
   getAuth,
   signInWithEmailAndPassword,
@@ -18,7 +18,8 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app);
+// ignoreUndefinedProperties: أي حقل فاضي (undefined) ما يفشّل الحفظ بصمت
+export const db = initializeFirestore(app, { ignoreUndefinedProperties: true });
 export const auth = getAuth(app);
 
 export function watchAuth(callback) {
